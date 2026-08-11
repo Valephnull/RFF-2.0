@@ -10,7 +10,8 @@
 This fork adds a whole bunch of new exploration features, some from other fractal exploration programs, for more automated deep zooming.
 
 ## New Features
-Newton-Raphson Zooming menu - basically Kalles Fraktaler's menu
-Auto-Exploration menu - basically Fractal eXtreme's menu but better, and with more features
+- Newton-Raphson Zooming menu - basically Kalles Fraktaler's menu
+- Auto-Exploration menu - basically Fractal eXtreme's menu but better, and with more features
+
 
 See the original RFF Repo for more details on the original project
