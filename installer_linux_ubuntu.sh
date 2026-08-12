@@ -1,249 +1,230 @@
-$RepoUrl = "https://github.com/Valephnull/RFF-EXP.git"
+#!/usr/bin/env bash
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+set -Eeuo pipefail
 
-$InstallRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-if ([string]::IsNullOrWhiteSpace($InstallRoot))
-{
-    $InstallRoot = (Get-Location).Path
+repo_url="https://github.com/Valephnull/RFF-EXP.git"
+install_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+version_file="$install_root/version.config"
+source_dir="$install_root/.rff-exp-source"
+staging_dir="$install_root/.rff-exp-installing"
+backup_dir="$install_root/.rff-exp-backup"
+tools_dir="$install_root/.rff-exp-tools"
+target_dirs=(res bin shaders)
+
+step() {
+    printf '\n\033[36m==== %s ====\033[0m\n' "$1"
 }
 
-$VersionFile = Join-Path $InstallRoot "version.config"
-$SourceDir = Join-Path $InstallRoot ".rff-exp-source"
-$StagingDir = Join-Path $InstallRoot ".rff-exp-installing"
-$BackupDir = Join-Path $InstallRoot ".rff-exp-backup"
-$TargetDirs = @("res", "bin", "shaders")
+restore_previous_install() {
+    local name
 
-function Write-Step([string]$Message)
-{
-    Write-Host ""
-    Write-Host "==== $Message ====" -ForegroundColor Cyan
+    [[ -d "$backup_dir" ]] || return 0
+
+    for name in "${target_dirs[@]}"; do
+        if [[ -e "$backup_dir/$name" ]]; then
+            rm -rf -- "$install_root/$name"
+            mv -- "$backup_dir/$name" "$install_root/$name"
+        elif [[ -e "$backup_dir/$name.absent" ]]; then
+            rm -rf -- "$install_root/$name"
+        fi
+    done
+
+    if [[ -f "$backup_dir/version.config" ]]; then
+        mv -f -- "$backup_dir/version.config" "$version_file"
+    elif [[ -e "$backup_dir/version.config.absent" ]]; then
+        rm -f -- "$version_file"
+    fi
+
+    rm -f -- "$version_file.tmp"
+    rm -rf -- "$backup_dir" "$staging_dir"
 }
 
-function Assert-NativeSuccess([string]$Action)
-{
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw "$Action failed with exit code $LASTEXITCODE."
-    }
-}
+if [[ -d "$backup_dir" ]]; then
+    step "Recovering an interrupted installation"
+    restore_previous_install
+fi
 
-function Remove-DirectoryIfPresent([string]$Path)
-{
-    if (Test-Path -LiteralPath $Path)
-    {
-        Remove-Item -LiteralPath $Path -Recurse -Force
-    }
-}
+step "Installing Ubuntu build dependencies"
 
-function Get-RemoteHeadSha([string]$Url)
-{
-    $Line = git ls-remote $Url HEAD | Select-Object -First 1
-    Assert-NativeSuccess "Reading the repository version"
-    if (-not $Line)
-    {
-        throw "The repository did not return a HEAD revision: $Url"
-    }
-    return ($Line -split "\s+")[0]
-}
+apt_command=(apt)
+if (( EUID != 0 )); then
+    if ! command -v sudo > /dev/null; then
+        printf '\033[31msudo is required when the installer is not run as root.\033[0m\n' >&2
+        exit 1
+    fi
+    apt_command=(sudo apt)
+fi
 
-$IsAdministrator = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-)
-if (-not $IsAdministrator)
-{
-    throw "Run installer_windows.bat as Administrator."
-}
+"${apt_command[@]}" update
+"${apt_command[@]}" install -y \
+    build-essential \
+    clang \
+    cmake \
+    git \
+    libglfw3-dev \
+    libglm-dev \
+    libgmp-dev \
+    libgtk-3-dev \
+    libopencv-dev \
+    libvulkan-dev \
+    ninja-build \
+    pkg-config \
+    python3-venv
 
-if (-not (Get-Command winget -ErrorAction SilentlyContinue))
-{
-    throw "winget was not found. Install 'App Installer' from the Microsoft Store, then run this installer again."
-}
+step "Checking the installed version"
 
-Write-Step "MSYS2 installation"
+newest_sha="$(git ls-remote "$repo_url" HEAD | awk 'NR == 1 { print $1 }')"
+if [[ -z "$newest_sha" ]]; then
+    printf '\033[31mCould not read the latest RFF-EXP revision.\033[0m\n' >&2
+    exit 1
+fi
 
-$Msys2Root = "C:\msys64"
-if ($env:MSYS2_ROOT -and (Test-Path -LiteralPath (Join-Path $env:MSYS2_ROOT "usr\bin\bash.exe")))
-{
-    $Msys2Root = $env:MSYS2_ROOT
-}
+installed_sha=""
+if [[ -f "$version_file" ]]; then
+    installed_sha="$(tr -d '[:space:]' < "$version_file")"
+fi
 
-$Msys2Bash = Join-Path $Msys2Root "usr\bin\bash.exe"
-if (-not (Test-Path -LiteralPath $Msys2Bash))
-{
-    winget install --exact --id MSYS2.MSYS2 --accept-package-agreements --accept-source-agreements --silent
-    Assert-NativeSuccess "Installing MSYS2"
-}
-if (-not (Test-Path -LiteralPath $Msys2Bash))
-{
-    throw "MSYS2 installation did not create $Msys2Bash."
-}
-
-Write-Step "MSYS2 package update and installation"
-
-& $Msys2Bash -lc "pacman -Syu --noconfirm --needed"
-Assert-NativeSuccess "Updating MSYS2"
-& $Msys2Bash -lc "pacman -Syu --noconfirm --needed"
-Assert-NativeSuccess "Completing the MSYS2 update"
-
-$Packages = @(
-    "git",
-    "mingw-w64-clang-x86_64-clang",
-    "mingw-w64-clang-x86_64-make",
-    "mingw-w64-clang-x86_64-cmake",
-    "mingw-w64-clang-x86_64-ninja",
-    "mingw-w64-clang-x86_64-gmp",
-    "mingw-w64-clang-x86_64-vulkan",
-    "mingw-w64-clang-x86_64-glm",
-    "mingw-w64-clang-x86_64-glfw",
-    "mingw-w64-clang-x86_64-opencv"
-) -join " "
-
-& $Msys2Bash -lc "pacman -S --noconfirm --needed $Packages"
-Assert-NativeSuccess "Installing the RFF build dependencies"
-
-Write-Step "Configuring the build environment"
-
-$Clang64Bin = Join-Path $Msys2Root "clang64\bin"
-$UsrBin = Join-Path $Msys2Root "usr\bin"
-$env:MSYS2_ROOT = $Msys2Root
-$env:PATH = "$Clang64Bin;$UsrBin;$env:PATH"
-
-# RFF and OpenCV depend on DLLs in clang64\bin. Persist this path so RFF also
-# starts after the installer process has closed.
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$UserPathParts = @($UserPath -split ";" | Where-Object { $_ })
-if ($UserPathParts -notcontains $Clang64Bin)
-{
-    $UpdatedUserPath = (@($Clang64Bin) + $UserPathParts) -join ";"
-    [Environment]::SetEnvironmentVariable("Path", $UpdatedUserPath, "User")
-}
-
-Write-Step "Checking the installed version"
-
-$NewestSha = Get-RemoteHeadSha $RepoUrl
-$InstalledSha = if (Test-Path -LiteralPath $VersionFile)
-{
-    (Get-Content -LiteralPath $VersionFile -Raw).Trim()
-}
-else
-{
-    ""
-}
-
-$InstalledExecutable = Join-Path $InstallRoot "bin\RFF.exe"
-if ($InstalledSha -eq $NewestSha -and (Test-Path -LiteralPath $InstalledExecutable))
-{
-    Write-Host "RFF-EXP is already up to date ($($NewestSha.Substring(0, 7)))." -ForegroundColor Green
-    Read-Host "Press Enter to exit"
+if [[ "$installed_sha" == "$newest_sha" && -x "$install_root/bin/RFF" ]]; then
+    printf '\033[32mRFF-EXP is already up to date (%s).\033[0m\n' "${newest_sha:0:7}"
+    if [[ -t 0 ]]; then
+        read -r -p "Press Enter to exit" _ || true
+    fi
     exit 0
-}
+fi
 
-Write-Step "Downloading RFF-EXP"
+step "Checking the build tools"
 
-Remove-DirectoryIfPresent $SourceDir
-git clone --depth 1 $RepoUrl $SourceDir
-Assert-NativeSuccess "Cloning RFF-EXP"
+if ! printf '#include <format>\n#include <locale>\nint main() { auto text = std::format(std::locale::classic(), "{}", 1); }\n' |
+    clang++ -std=c++20 -x c++ -fsyntax-only -; then
+    printf '\033[31mThe installed C++ standard library does not provide the C++20 features required by RFF-EXP.\033[0m\n' >&2
+    printf '\033[31mUbuntu 24.04 or newer is required by the current RFF source.\033[0m\n' >&2
+    exit 1
+fi
 
-Write-Step "Downloading external source dependencies"
+cmake_command="$(command -v cmake || true)"
+cmake_version=""
+if [[ -n "$cmake_command" ]]; then
+    cmake_version="$($cmake_command --version | awk 'NR == 1 { print $3 }')"
+fi
 
-$ExternDir = Join-Path $SourceDir "extern"
-New-Item -ItemType Directory -Path $ExternDir -Force | Out-Null
-$ExternSourcesFile = Join-Path $SourceDir "extern_sources"
-$ExternRepos = Get-Content -LiteralPath $ExternSourcesFile |
-    ForEach-Object { $_.Trim() } |
-    Where-Object { $_ -and -not $_.StartsWith("#") }
+if [[ -z "$cmake_version" ]] || ! dpkg --compare-versions "$cmake_version" ge "3.30"; then
+    printf '\033[33mCMake 3.30 or newer is required; installing a private copy for RFF-EXP.\033[0m\n'
+    rm -rf -- "$tools_dir"
+    python3 -m venv "$tools_dir"
+    "$tools_dir/bin/python" -m pip install --disable-pip-version-check --upgrade "cmake>=3.30,<5"
+    cmake_command="$tools_dir/bin/cmake"
+fi
 
-foreach ($Url in $ExternRepos)
-{
-    $DirectoryName = [System.IO.Path]::GetFileNameWithoutExtension($Url.TrimEnd('/'))
-    $Destination = Join-Path $ExternDir $DirectoryName
-    git clone --depth 1 $Url $Destination
-    Assert-NativeSuccess "Cloning external dependency $Url"
-}
+printf 'Using %s\n' "$($cmake_command --version | awk 'NR == 1')"
 
-Write-Step "Building RFF-EXP"
+step "Downloading RFF-EXP"
 
-$BuildDir = Join-Path $SourceDir "build"
-cmake -S $SourceDir -B $BuildDir -G "Ninja" `
-    -DCMAKE_C_COMPILER=clang `
-    -DCMAKE_CXX_COMPILER=clang++ `
+rm -rf -- "$source_dir" "$staging_dir" "$backup_dir"
+git clone --depth 1 "$repo_url" "$source_dir"
+
+step "Downloading external source dependencies"
+
+mkdir -p "$source_dir/extern"
+while IFS= read -r dependency_url; do
+    dependency_url="${dependency_url%%#*}"
+    dependency_url="$(printf '%s' "$dependency_url" | xargs)"
+    [[ -z "$dependency_url" ]] && continue
+    dependency_name="$(basename "${dependency_url%.git}")"
+    git clone --depth 1 "$dependency_url" "$source_dir/extern/$dependency_name"
+done < "$source_dir/extern_sources"
+
+step "Building RFF-EXP"
+
+"$cmake_command" -S "$source_dir" -B "$source_dir/build" -G Ninja \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_BUILD_TYPE=Release
-Assert-NativeSuccess "Configuring RFF-EXP"
+"$cmake_command" --build "$source_dir/build" --parallel "$(nproc)"
 
-$ParallelJobs = if ($env:NUMBER_OF_PROCESSORS) { [int]$env:NUMBER_OF_PROCESSORS } else { 1 }
-cmake --build $BuildDir --parallel $ParallelJobs
-Assert-NativeSuccess "Building RFF-EXP"
+step "Installing RFF-EXP"
 
-Write-Step "Installing RFF-EXP"
+mkdir -p "$staging_dir" "$backup_dir"
+for name in "${target_dirs[@]}"; do
+    if [[ ! -e "$source_dir/$name" ]]; then
+        printf '\033[31mThe completed build is missing %s.\033[0m\n' "$name" >&2
+        exit 1
+    fi
+    cp -a -- "$source_dir/$name" "$staging_dir/$name"
+done
 
-Remove-DirectoryIfPresent $StagingDir
-Remove-DirectoryIfPresent $BackupDir
-New-Item -ItemType Directory -Path $StagingDir | Out-Null
-New-Item -ItemType Directory -Path $BackupDir | Out-Null
+backed_up=()
+installed=()
+rollback_install() {
+    set +e
+    for name in "${installed[@]}"; do
+        rm -rf -- "$install_root/$name"
+    done
+    for name in "${backed_up[@]}"; do
+        if [[ -e "$backup_dir/$name" ]]; then
+            mv -- "$backup_dir/$name" "$install_root/$name"
+        fi
+    done
 
-foreach ($Name in $TargetDirs)
-{
-    $Source = Join-Path $SourceDir $Name
-    if (-not (Test-Path -LiteralPath $Source))
-    {
-        throw "The completed build is missing '$Name'."
-    }
-    Copy-Item -LiteralPath $Source -Destination (Join-Path $StagingDir $Name) -Recurse
+    rm -f -- "$version_file" "$version_file.tmp"
+    if [[ -f "$backup_dir/version.config" ]]; then
+        mv -- "$backup_dir/version.config" "$version_file"
+    fi
+
+    rm -rf -- "$backup_dir" "$staging_dir"
 }
 
-$BackedUp = [System.Collections.Generic.List[string]]::new()
-$Installed = [System.Collections.Generic.List[string]]::new()
-try
-{
-    foreach ($Name in $TargetDirs)
-    {
-        $Destination = Join-Path $InstallRoot $Name
-        if (Test-Path -LiteralPath $Destination)
-        {
-            Move-Item -LiteralPath $Destination -Destination (Join-Path $BackupDir $Name)
-            $BackedUp.Add($Name)
-        }
-    }
-
-    foreach ($Name in $TargetDirs)
-    {
-        Move-Item -LiteralPath (Join-Path $StagingDir $Name) -Destination (Join-Path $InstallRoot $Name)
-        $Installed.Add($Name)
-    }
-}
-catch
-{
-    foreach ($Name in $Installed)
-    {
-        Remove-DirectoryIfPresent (Join-Path $InstallRoot $Name)
-    }
-    foreach ($Name in $BackedUp)
-    {
-        $Backup = Join-Path $BackupDir $Name
-        if (Test-Path -LiteralPath $Backup)
-        {
-            Move-Item -LiteralPath $Backup -Destination (Join-Path $InstallRoot $Name)
-        }
-    }
-    throw
+deployment_failed() {
+    local status=$?
+    trap - ERR INT TERM
+    rollback_install
+    exit "$status"
 }
 
-$VersionTemp = "$VersionFile.tmp"
-Set-Content -LiteralPath $VersionTemp -Value $NewestSha -NoNewline
-Move-Item -LiteralPath $VersionTemp -Destination $VersionFile -Force
-
-Remove-DirectoryIfPresent $BackupDir
-Remove-DirectoryIfPresent $StagingDir
-Remove-DirectoryIfPresent $SourceDir
-
-Write-Step "Installation finished"
-Write-Host "Location: $InstallRoot" -ForegroundColor Green
-Write-Host "Version:  $($NewestSha.Substring(0, 7))" -ForegroundColor Green
-
-$Launch = Read-Host "Launch RFF-EXP now? [y/N]"
-if ($Launch -match "^[Yy]")
-{
-    Start-Process -FilePath $InstalledExecutable -WorkingDirectory $InstallRoot
+deployment_interrupted() {
+    local status="$1"
+    trap - ERR INT TERM
+    rollback_install
+    exit "$status"
 }
+
+trap deployment_failed ERR
+trap 'deployment_interrupted 130' INT
+trap 'deployment_interrupted 143' TERM
+
+if [[ -f "$version_file" ]]; then
+    mv -- "$version_file" "$backup_dir/version.config"
+else
+    : > "$backup_dir/version.config.absent"
+fi
+
+for name in "${target_dirs[@]}"; do
+    if [[ -e "$install_root/$name" ]]; then
+        mv -- "$install_root/$name" "$backup_dir/$name"
+        backed_up+=("$name")
+    else
+        : > "$backup_dir/$name.absent"
+    fi
+done
+
+for name in "${target_dirs[@]}"; do
+    mv -- "$staging_dir/$name" "$install_root/$name"
+    installed+=("$name")
+done
+
+printf '%s' "$newest_sha" > "$version_file.tmp"
+mv -- "$version_file.tmp" "$version_file"
+trap - ERR INT TERM
+
+rm -rf -- "$backup_dir" "$staging_dir" "$source_dir"
+
+step "Installation finished"
+printf '\033[32mLocation: %s\033[0m\n' "$install_root"
+printf '\033[32mVersion:  %s\033[0m\n' "${newest_sha:0:7}"
+
+launch=""
+if [[ -t 0 ]]; then
+    read -r -p "Launch RFF-EXP now? [y/N] " launch || true
+fi
+if [[ "$launch" =~ ^[Yy]$ ]]; then
+    (cd "$install_root" && ./bin/RFF)
+fi
