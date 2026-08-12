@@ -5,8 +5,8 @@
 
 #pragma once
 #include "../calc/fixed_point_complex.hpp"
-#include "../formula/MB2RenderData.hpp"
 #include "../parallel/ParallelRenderState.h"
+#include "MB2RenderData.hpp"
 
 namespace merutilm::rff2 {
     struct MB2Locator {

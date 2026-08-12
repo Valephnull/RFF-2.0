@@ -6,9 +6,9 @@
 #include "MB2Locator.h"
 
 #include "../calc/dex_exp.h"
-#include "../formula/MB2Reference.h"
-#include "../formula/MB2RenderData.hpp"
-#include "../formula/Perturbator.h"
+#include "MB2Reference.h"
+#include "MB2RenderData.hpp"
+#include "Perturbator.h"
 
 
 namespace merutilm::rff2 {
@@ -67,7 +67,7 @@ namespace merutilm::rff2 {
         }
         dex resultDcMax = result->getPerturbator()->dcMax;
 
-        auto &[bailout, logZoom] = result->fractalSettings.general;
+        auto &logZoom = result->fractalSettings.general.logZoom;
         float resultZoom = logZoom;
         float zoomIncrement = resultZoom / 4;
 

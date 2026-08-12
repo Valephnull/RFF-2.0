@@ -5,9 +5,9 @@
 #pragma once
 #include <atomic>
 
-#include "../formula/MB2Perturbator.h"
-#include "../formula/MB2RenderData.hpp"
 #include "../io/RFFDynamicMapBinary.h"
+#include "../mb/MB2Perturbator.h"
+#include "../mb/MB2RenderData.hpp"
 #include "../parallel/BackgroundThreads.h"
 #include "../preset/Presets.h"
 #include "../settings/Settings.h"
@@ -20,7 +20,7 @@
 #include "vulkan_helper/Application.hpp"
 
 namespace merutilm::rff2 {
-    class RFFApplication final : public vkh::Application {
+    class RFF2 final : public vkh::Application {
 
         ParallelRenderState state = {};
         Settings settings;
@@ -29,6 +29,7 @@ namespace merutilm::rff2 {
 
         std::atomic<bool> idleCompute = true;
         std::atomic<uint64_t> completedRenderCount = 0;
+        std::atomic<bool> canShowPreview = false;
 
         std::array<std::string, Constants::Status::LENGTH> statusMessages = {};
         std::unique_ptr<Matrix<double>> iterationMatrix = nullptr;
@@ -42,19 +43,19 @@ namespace merutilm::rff2 {
         AutoExplorer autoExplorer;
 
     public:
-        explicit RFFApplication(const vkh::WindowInitializerSettings &wic) : Application(wic), settings(genDefaultSettings()) {
+        explicit RFF2(const vkh::WindowInitializerSettings &wic) : Application(wic), settings(genDefaultSettings()) {
 
         }
 
-        ~RFFApplication() override = default;
+        ~RFF2() override = default;
 
-        RFFApplication(const RFFApplication &) = delete;
+        RFF2(const RFF2 &) = delete;
 
-        RFFApplication &operator=(const RFFApplication &) = delete;
+        RFF2 &operator=(const RFF2 &) = delete;
 
-        RFFApplication(RFFApplication &&) = delete;
+        RFF2(RFF2 &&) = delete;
 
-        RFFApplication &operator=(RFFApplication &&) = delete;
+        RFF2 &operator=(RFF2 &&) = delete;
 
         void update() override;
 
@@ -74,9 +75,12 @@ namespace merutilm::rff2 {
 
         void addListeners() override;
 
+        void zoom(int16_t px, int16_t py, float logIncrement);
+
         void applyDefaultSettings();
 
         void applyCreateImage();
+
         void invokeUpdaters();
 
         void applyShaderSettings(const Settings &s) const;
@@ -187,7 +191,7 @@ namespace merutilm::rff2 {
 
 
     template<typename P> requires std::is_base_of_v<Preset, P>
-    void RFFApplication::applyPreset(P &preset) {
+    void RFF2::applyPreset(P &preset) {
         if constexpr (std::is_base_of_v<Presets::CalculationPreset, P>) {
             settings.fractal.reference.sync = preset.genRefSync();
             settings.fractal.mpa = preset.genMPA();

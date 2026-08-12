@@ -27,7 +27,7 @@ add_executable(
         src/rff2/ui/FnFractal.cpp
         src/rff2/ui/FnRender.cpp
         src/rff2/ui/FnShader.cpp
-        src/rff2/locator/MB2Locator.cpp
+        src/rff2/mb/MB2Locator.cpp
         src/rff2/ui/FnExplore.cpp
         src/rff2/ui/AutoExplorer.cpp
         src/rff2/preset/shader/palette/ShdPalettePresets.cpp
@@ -47,7 +47,7 @@ add_executable(
         src/rff2/io/KFRColorLoader.cpp
         extern/stb_image.c
         src/rff2/vulkan/GPCIterationPalette.cpp
-        src/rff2/ui/RFFApplication.cpp
+        src/rff2/ui/RFF2.cpp
         src/rff2/vulkan/GPCStripe.cpp
         src/rff2/vulkan/GPCSlope.cpp
         src/rff2/vulkan/GPCColor.cpp

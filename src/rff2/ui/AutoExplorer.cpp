@@ -5,11 +5,11 @@
 #include <cmath>
 #include <format>
 
-#include "../formula/Perturbator.h"
-#include "RFFApplication.hpp"
+#include "../mb/Perturbator.h"
+#include "RFF2.hpp"
 
 namespace merutilm::rff2 {
-    void AutoExplorer::start(RFFApplication &app) {
+    void AutoExplorer::start(RFF2 &app) {
         config.zoomIncrement = std::clamp(config.zoomIncrement, 0.01f, 1000.0f);
         config.stopLogZoom = std::max(config.stopLogZoom, app.getSettings().fractal.general.logZoom);
         config.minimumContrast = std::max(config.minimumContrast, 0.0f);
@@ -38,7 +38,7 @@ namespace merutilm::rff2 {
         status = "Stopped";
     }
 
-    void AutoExplorer::update(RFFApplication &app) {
+    void AutoExplorer::update(RFF2 &app) {
         if (!running)
             return;
 
@@ -64,7 +64,7 @@ namespace merutilm::rff2 {
             running = false;
     }
 
-    AutoExplorer::Candidate AutoExplorer::findCandidate(const RFFApplication &app) {
+    AutoExplorer::Candidate AutoExplorer::findCandidate(const RFF2 &app) {
         const Matrix<double> *matrix = app.getIterationMatrix();
         if (!matrix || matrix->getWidth() < 3 || matrix->getHeight() < 3)
             return {};
@@ -117,7 +117,7 @@ namespace merutilm::rff2 {
         return best;
     }
 
-    bool AutoExplorer::advance(RFFApplication &app) {
+    bool AutoExplorer::advance(RFF2 &app) {
         const Candidate candidate = findCandidate(app);
         if (!(candidate.contrast > 0)) {
             if (config.recoverWhenStuck)
@@ -168,7 +168,7 @@ namespace merutilm::rff2 {
         return true;
     }
 
-    bool AutoExplorer::recover(RFFApplication &app, const Candidate &failedCandidate, const std::string_view reason) {
+    bool AutoExplorer::recover(RFF2 &app, const Candidate &failedCandidate, const std::string_view reason) {
         Settings &settings = app.getSettings();
         const float currentZoom = settings.fractal.general.logZoom;
         const float recoveredZoom = std::max(Constants::Fractal::ZOOM_MIN, currentZoom - config.recoveryZoomOut);

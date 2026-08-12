@@ -6,7 +6,7 @@
 #include <string_view>
 
 namespace merutilm::rff2 {
-    class RFFApplication;
+    class RFF2;
 
     class AutoExplorer final {
     public:
@@ -23,9 +23,9 @@ namespace merutilm::rff2 {
             int recoveryAvoidRadiusPercent = 10;
         } config;
 
-        void start(RFFApplication &app);
+        void start(RFF2 &app);
         void stop();
-        void update(RFFApplication &app);
+        void update(RFF2 &app);
 
         [[nodiscard]] bool isRunning() const { return running; }
         [[nodiscard]] uint64_t getStepCount() const { return stepCount; }
@@ -53,8 +53,8 @@ namespace merutilm::rff2 {
         std::mt19937 random = {};
         std::string status = "Stopped";
 
-        [[nodiscard]] Candidate findCandidate(const RFFApplication &app);
-        bool advance(RFFApplication &app);
-        bool recover(RFFApplication &app, const Candidate &failedCandidate, std::string_view reason);
+        [[nodiscard]] Candidate findCandidate(const RFF2 &app);
+        bool advance(RFF2 &app);
+        bool recover(RFF2 &app, const Candidate &failedCandidate, std::string_view reason);
     };
 } // namespace merutilm::rff2

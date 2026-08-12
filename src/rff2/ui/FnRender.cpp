@@ -4,29 +4,30 @@
 
 #include "FnRender.hpp"
 
-#include "RFFApplication.hpp"
+#include "RFF2.hpp"
 #include "Utilities.h"
 #include "imgui.h"
 
 namespace merutilm::rff2 {
 
-    void FnRender::setResolutionProperties(RFFApplication &app) {
+    void FnRender::setResolutionProperties(RFF2 &app) {
         static bool setResolution = false;
         static std::array<uint32_t, 2> resolutionTemp;
         static float clarityMultiplierTemp;
         static bool valueChanged = false;
         auto [width, height] = app.getWindowContext().getSwapchain().getSwapchainExtent();
+        float &clarityMultiplier = app.getSettings().render.clarityMultiplier;
+
 
         if (ImGui::Checkbox("Set Resolution Properties", &setResolution)) {
             resolutionTemp[0] = width;
             resolutionTemp[1] = height;
-            clarityMultiplierTemp = app.getSettings().render.clarityMultiplier;
+            clarityMultiplierTemp = clarityMultiplier;
             valueChanged = false;
         }
 
         if (setResolution) {
 
-            auto &[clarityMultiplier, fps, linearInterpolation, threads] = app.getSettings().render;
 
             ImGui::Begin("Set Resolution Properties");
 
@@ -40,7 +41,7 @@ namespace merutilm::rff2 {
                                  Constants::UI::CLARITY_MULTIPLIER_UNIT, Constants::Render::MIN_CLARITY_MULTIPLIER,
                                  Constants::Render::MAX_CLARITY_MULTIPLIER)) {
                 clarityMultiplierTemp = std::clamp(clarityMultiplierTemp, Constants::Render::MIN_CLARITY_MULTIPLIER,
-                                                   Constants::Render::MAX_CLARITY_MULTIPLIER);\
+                                                   Constants::Render::MAX_CLARITY_MULTIPLIER);
                 valueChanged = true;
             }
 
@@ -63,7 +64,7 @@ namespace merutilm::rff2 {
             if (ImGui::Button(str.data(), ImVec2(-FLT_MIN, 0))) {
                 app.getWindowContext().getWindow()->setResolution(static_cast<int>(resolutionTemp[0]),
                                                                   static_cast<int>(resolutionTemp[1]));
-                clarityMultiplier = clarityMultiplierTemp;
+                app.getSettings().render.clarityMultiplier = clarityMultiplierTemp;
                 app.getRequests().requestResize(swapchainExtent);
                 valueChanged = false;
             } else if (!valueChanged)
@@ -78,14 +79,14 @@ namespace merutilm::rff2 {
         }
     }
 
-    void FnRender::setRenderProperties(RFFApplication &app) {
+    void FnRender::setRenderProperties(RFF2 &app) {
         static bool setRenderProperties = false;
 
         ImGui::Checkbox("Set Render Properties", &setRenderProperties);
 
         if (setRenderProperties) {
 
-            auto &[clarityMultiplier, fps, linearInterpolation, threads] = app.getSettings().render;
+            float &fps = app.getSettings().render.fps;
 
 
             constexpr uint32_t minThread = 1;
@@ -101,7 +102,7 @@ namespace merutilm::rff2 {
             Utilities::imguiHelpMarker("Sets the Framerate.");
 
 
-            if (ImGui::SliderScalar("Threads", ImGuiDataType_U32, &threads, &minThread, &maxThreads)) {
+            if (ImGui::SliderScalar("Threads", ImGuiDataType_U32, &app.getSettings().fractal.general.threads, &minThread, &maxThreads)) {
                 // noop
             }
             Utilities::imguiHelpMarker("Sets the number of threads while rendering an image.");
@@ -114,7 +115,7 @@ namespace merutilm::rff2 {
         }
     }
 
-    void FnRender::linearInterpolation(RFFApplication &app) {
+    void FnRender::linearInterpolation(RFF2 &app) {
         if (ImGui::Checkbox("Linear Interpolation", &app.getSettings().render.linearInterpolation)) {
             app.getRequests().requestShader();
         }
