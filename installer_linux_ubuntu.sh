@@ -1,92 +1,249 @@
-#!/bin/bash
+$RepoUrl = "https://github.com/Valephnull/RFF-EXP.git"
 
-set -e
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-path="$(cd "$(dirname "$0")" && pwd)"
-cd "$path" || exit
+$InstallRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($InstallRoot))
+{
+    $InstallRoot = (Get-Location).Path
+}
 
+$VersionFile = Join-Path $InstallRoot "version.config"
+$SourceDir = Join-Path $InstallRoot ".rff-exp-source"
+$StagingDir = Join-Path $InstallRoot ".rff-exp-installing"
+$BackupDir = Join-Path $InstallRoot ".rff-exp-backup"
+$TargetDirs = @("res", "bin", "shaders")
 
-printf "\033[36m=================== Package Installation ===================\033[0m\n"
+function Write-Step([string]$Message)
+{
+    Write-Host ""
+    Write-Host "==== $Message ====" -ForegroundColor Cyan
+}
 
-sudo apt update
-sudo apt install -y clang clang-tools build-essential make cmake libopencv-dev libvulkan-dev libglm-dev ninja-build libgtk-3-dev git wget xz-utils libglfw3-dev
+function Assert-NativeSuccess([string]$Action)
+{
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "$Action failed with exit code $LASTEXITCODE."
+    }
+}
 
-if find /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu -name "libgmp.a" 2>/dev/null | grep -q .; then
-    printf "\033[33mGMP already installed. Skipping GMP build\033[0m\n"
+function Remove-DirectoryIfPresent([string]$Path)
+{
+    if (Test-Path -LiteralPath $Path)
+    {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    }
+}
+
+function Get-RemoteHeadSha([string]$Url)
+{
+    $Line = git ls-remote $Url HEAD | Select-Object -First 1
+    Assert-NativeSuccess "Reading the repository version"
+    if (-not $Line)
+    {
+        throw "The repository did not return a HEAD revision: $Url"
+    }
+    return ($Line -split "\s+")[0]
+}
+
+$IsAdministrator = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $IsAdministrator)
+{
+    throw "Run installer_windows.bat as Administrator."
+}
+
+if (-not (Get-Command winget -ErrorAction SilentlyContinue))
+{
+    throw "winget was not found. Install 'App Installer' from the Microsoft Store, then run this installer again."
+}
+
+Write-Step "MSYS2 installation"
+
+$Msys2Root = "C:\msys64"
+if ($env:MSYS2_ROOT -and (Test-Path -LiteralPath (Join-Path $env:MSYS2_ROOT "usr\bin\bash.exe")))
+{
+    $Msys2Root = $env:MSYS2_ROOT
+}
+
+$Msys2Bash = Join-Path $Msys2Root "usr\bin\bash.exe"
+if (-not (Test-Path -LiteralPath $Msys2Bash))
+{
+    winget install --exact --id MSYS2.MSYS2 --accept-package-agreements --accept-source-agreements --silent
+    Assert-NativeSuccess "Installing MSYS2"
+}
+if (-not (Test-Path -LiteralPath $Msys2Bash))
+{
+    throw "MSYS2 installation did not create $Msys2Bash."
+}
+
+Write-Step "MSYS2 package update and installation"
+
+& $Msys2Bash -lc "pacman -Syu --noconfirm --needed"
+Assert-NativeSuccess "Updating MSYS2"
+& $Msys2Bash -lc "pacman -Syu --noconfirm --needed"
+Assert-NativeSuccess "Completing the MSYS2 update"
+
+$Packages = @(
+    "git",
+    "mingw-w64-clang-x86_64-clang",
+    "mingw-w64-clang-x86_64-make",
+    "mingw-w64-clang-x86_64-cmake",
+    "mingw-w64-clang-x86_64-ninja",
+    "mingw-w64-clang-x86_64-gmp",
+    "mingw-w64-clang-x86_64-vulkan",
+    "mingw-w64-clang-x86_64-glm",
+    "mingw-w64-clang-x86_64-glfw",
+    "mingw-w64-clang-x86_64-opencv"
+) -join " "
+
+& $Msys2Bash -lc "pacman -S --noconfirm --needed $Packages"
+Assert-NativeSuccess "Installing the RFF build dependencies"
+
+Write-Step "Configuring the build environment"
+
+$Clang64Bin = Join-Path $Msys2Root "clang64\bin"
+$UsrBin = Join-Path $Msys2Root "usr\bin"
+$env:MSYS2_ROOT = $Msys2Root
+$env:PATH = "$Clang64Bin;$UsrBin;$env:PATH"
+
+# RFF and OpenCV depend on DLLs in clang64\bin. Persist this path so RFF also
+# starts after the installer process has closed.
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$UserPathParts = @($UserPath -split ";" | Where-Object { $_ })
+if ($UserPathParts -notcontains $Clang64Bin)
+{
+    $UpdatedUserPath = (@($Clang64Bin) + $UserPathParts) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $UpdatedUserPath, "User")
+}
+
+Write-Step "Checking the installed version"
+
+$NewestSha = Get-RemoteHeadSha $RepoUrl
+$InstalledSha = if (Test-Path -LiteralPath $VersionFile)
+{
+    (Get-Content -LiteralPath $VersionFile -Raw).Trim()
+}
 else
-    if [[ ! -d gmp-6.3.0 ]]; then
-       wget https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz
-        tar -xf gmp-6.3.0.tar.xz
-    fi
-    cd gmp-6.3.0 || exit
-    rm -rf build
-    mkdir build
-    cd build || exit
-    ../configure CFLAGS="-O3 -march=native"
-    make -j"$(nproc)"
-    sudo make install
-    cd ~ || exit
-    sudo ldconfig
-    printf "\033[32mGMP is successfully installed.\033[0m"
-fi
+{
+    ""
+}
 
+$InstalledExecutable = Join-Path $InstallRoot "bin\RFF.exe"
+if ($InstalledSha -eq $NewestSha -and (Test-Path -LiteralPath $InstalledExecutable))
+{
+    Write-Host "RFF-EXP is already up to date ($($NewestSha.Substring(0, 7)))." -ForegroundColor Green
+    Read-Host "Press Enter to exit"
+    exit 0
+}
 
-printf "\033[36m=================== RFF Installation ===================\033[0m\n"
+Write-Step "Downloading RFF-EXP"
 
-url="https://github.com/Valephnull/RFF-EXP";
-hash=$(git ls-remote "$url" HEAD | head -n 1 | awk '{print $1}')
-if [[ -f version.config ]]; then
-    prevHash=$(<version.config)
-else
-    prevHash=""
-fi
+Remove-DirectoryIfPresent $SourceDir
+git clone --depth 1 $RepoUrl $SourceDir
+Assert-NativeSuccess "Cloning RFF-EXP"
 
-if [[ "$prevHash" == "$hash" ]]; then
-  read -n 1 -s -r -p "Application is up to date. Press any key to exit...\n"
-  exit 0
-fi
+Write-Step "Downloading external source dependencies"
 
-rm -rf RFF-2.0
-git clone https://github.com/Merutilm/RFF-2.0
-cd RFF-2.0 || exit
-mapfile -t externRepos < <(grep -vE '^\s*(#|$)' "extern_sources")
+$ExternDir = Join-Path $SourceDir "extern"
+New-Item -ItemType Directory -Path $ExternDir -Force | Out-Null
+$ExternSourcesFile = Join-Path $SourceDir "extern_sources"
+$ExternRepos = Get-Content -LiteralPath $ExternSourcesFile |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -and -not $_.StartsWith("#") }
 
-printf "\033[32mRFF has been loaded. configuring dependencies\033[0m\n"
+foreach ($Url in $ExternRepos)
+{
+    $DirectoryName = [System.IO.Path]::GetFileNameWithoutExtension($Url.TrimEnd('/'))
+    $Destination = Join-Path $ExternDir $DirectoryName
+    git clone --depth 1 $Url $Destination
+    Assert-NativeSuccess "Cloning external dependency $Url"
+}
 
-mkdir -p extern
-cd extern || exit
+Write-Step "Building RFF-EXP"
 
-for url in "${externRepos[@]}"; do
-    git clone "$url"
-done
+$BuildDir = Join-Path $SourceDir "build"
+cmake -S $SourceDir -B $BuildDir -G "Ninja" `
+    -DCMAKE_C_COMPILER=clang `
+    -DCMAKE_CXX_COMPILER=clang++ `
+    -DCMAKE_BUILD_TYPE=Release
+Assert-NativeSuccess "Configuring RFF-EXP"
 
-printf "\033[32mDependencies have been loaded. Application is ready to build\033[0m\n"
+$ParallelJobs = if ($env:NUMBER_OF_PROCESSORS) { [int]$env:NUMBER_OF_PROCESSORS } else { 1 }
+cmake --build $BuildDir --parallel $ParallelJobs
+Assert-NativeSuccess "Building RFF-EXP"
 
-cd ..
-mkdir -p build
+Write-Step "Installing RFF-EXP"
 
-cmake -B build -G "Ninja" -S . \
--DCMAKE_C_COMPILER=clang \
--DCMAKE_CXX_COMPILER=clang++ \
--DCMAKE_BUILD_TYPE=Release
+Remove-DirectoryIfPresent $StagingDir
+Remove-DirectoryIfPresent $BackupDir
+New-Item -ItemType Directory -Path $StagingDir | Out-Null
+New-Item -ItemType Directory -Path $BackupDir | Out-Null
 
-cmake --build build -j"$(nproc)"
+foreach ($Name in $TargetDirs)
+{
+    $Source = Join-Path $SourceDir $Name
+    if (-not (Test-Path -LiteralPath $Source))
+    {
+        throw "The completed build is missing '$Name'."
+    }
+    Copy-Item -LiteralPath $Source -Destination (Join-Path $StagingDir $Name) -Recurse
+}
 
-rm -rf ../res ../bin ../shaders
-mv res ../res
-mv bin ../bin
-mv shaders ../shaders
-cd ..
-rm -rf RFF-2.0
+$BackedUp = [System.Collections.Generic.List[string]]::new()
+$Installed = [System.Collections.Generic.List[string]]::new()
+try
+{
+    foreach ($Name in $TargetDirs)
+    {
+        $Destination = Join-Path $InstallRoot $Name
+        if (Test-Path -LiteralPath $Destination)
+        {
+            Move-Item -LiteralPath $Destination -Destination (Join-Path $BackupDir $Name)
+            $BackedUp.Add($Name)
+        }
+    }
 
-echo "$hash" > version.config
-printf "\033[32mInstallation Finished\033[0m\n"
-printf "\033[32mLocation: %s/bin/RFF\033[0m\n" "$path"
-read -n 1 -r -p "Do you want to launch installed application now? [y/n] :" answer
+    foreach ($Name in $TargetDirs)
+    {
+        Move-Item -LiteralPath (Join-Path $StagingDir $Name) -Destination (Join-Path $InstallRoot $Name)
+        $Installed.Add($Name)
+    }
+}
+catch
+{
+    foreach ($Name in $Installed)
+    {
+        Remove-DirectoryIfPresent (Join-Path $InstallRoot $Name)
+    }
+    foreach ($Name in $BackedUp)
+    {
+        $Backup = Join-Path $BackupDir $Name
+        if (Test-Path -LiteralPath $Backup)
+        {
+            Move-Item -LiteralPath $Backup -Destination (Join-Path $InstallRoot $Name)
+        }
+    }
+    throw
+}
 
-if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
-  ./bin/RFF
-fi
+$VersionTemp = "$VersionFile.tmp"
+Set-Content -LiteralPath $VersionTemp -Value $NewestSha -NoNewline
+Move-Item -LiteralPath $VersionTemp -Destination $VersionFile -Force
 
+Remove-DirectoryIfPresent $BackupDir
+Remove-DirectoryIfPresent $StagingDir
+Remove-DirectoryIfPresent $SourceDir
 
+Write-Step "Installation finished"
+Write-Host "Location: $InstallRoot" -ForegroundColor Green
+Write-Host "Version:  $($NewestSha.Substring(0, 7))" -ForegroundColor Green
 
+$Launch = Read-Host "Launch RFF-EXP now? [y/N]"
+if ($Launch -match "^[Yy]")
+{
+    Start-Process -FilePath $InstalledExecutable -WorkingDirectory $InstallRoot
+}
