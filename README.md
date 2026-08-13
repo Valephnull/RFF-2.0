@@ -10,4 +10,4 @@ Currently, I have added:
 - Zoom Redirection thing - from Imagina, satisfyingly redirects zooming towards point feature thing
 
 ## Installation
-I haven't tested the installers yet but they might work? For now just build it manually, same process as the original thing
+Installers don't work, please build it manually (instructions on the original RFF page)
