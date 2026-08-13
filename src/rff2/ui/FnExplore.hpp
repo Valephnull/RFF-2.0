@@ -16,6 +16,7 @@ namespace merutilm::rff2 {
         static void cancelRender(RFF2 &app);
         static void locateCenteredReference(RFF2 &app);
         static void locateMinibrot(RFF2 &app);
+        static void guidedZoom(RFF2 &app);
         static void autoExplorer(RFF2 &app);
 
         static std::function<void(uint64_t, int)> getActionWhileFindingMBCenter(RFF2 &app,

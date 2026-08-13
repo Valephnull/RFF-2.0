@@ -6,6 +6,7 @@
 
 #include "../calc/dex_exp.h"
 #include "../mb/MB2Locator.h"
+#include "../mb/MandelbrotFeatureFinder.hpp"
 #include "../parallel/ParallelArrayDispatcher.h"
 #include "../parallel/ParallelDispatcher.h"
 #include "../preset/calc/CalculationPresets.h"
@@ -70,6 +71,16 @@ namespace merutilm::rff2 {
 
     void RFF2::update() {
 
+        // Mouse-wheel input changes the smooth preview immediately, but CPU renders
+        // are coalesced. Never cancel and join a render for every wheel tick.
+        constexpr double WHEEL_RENDER_DEBOUNCE_SECONDS = 0.09;
+        const double now = rootWindowContext->getWindow()->getTime();
+        if (wheelZoomRenderPending && idleCompute.load() &&
+            now - wheelZoomLastInputTime >= WHEEL_RENDER_DEBOUNCE_SECONDS) {
+            wheelZoomRenderPending = false;
+            requests.requestRecompute();
+        }
+
         if (requests.defaultSettingsRequested) {
             applyDefaultSettings();
             requests.defaultSettingsRequested.exchange(false);
@@ -89,6 +100,7 @@ namespace merutilm::rff2 {
         }
 
         if (requests.recomputeRequested) {
+            canShowPreview = false;
             idleCompute = false;
             requests.recomputeRequested.exchange(false);
             recomputeThreaded();
@@ -212,14 +224,140 @@ namespace merutilm::rff2 {
 
     uint16_t RFF2::getIterationBufferHeight() const { return renderer->rg0->iterationPalette->iterHeight; }
 
+    RFF2::GuidedZoomTarget RFF2::findGuidedZoomTarget(const int mouseX, const int mouseY) const {
+        const MB2RenderDataBase *data = renderData.get();
+        const MB2PerturbatorBase *perturbator = data ? data->getPerturbator() : nullptr;
+        if (!guidedZoom || !idleCompute.load() || !data || !data->getReference() || !perturbator)
+            return {};
+
+        const int width = getIterationBufferWidth();
+        const int height = getIterationBufferHeight();
+        const int cursorX = std::clamp(mouseX, 0, width - 1);
+        const int cursorY = std::clamp(mouseY, 0, height - 1);
+        const float clarity = std::max(settings.render.clarityMultiplier, 0.001f);
+        const dex divisor = getDivisor(settings);
+        const complex<dex> cursorOffsetFromCurrent = {
+                dex(static_cast<double>(cursorX) - static_cast<double>(width) / 2.0) / divisor / dex(clarity),
+                dex(static_cast<double>(cursorY) - static_cast<double>(height) / 2.0) / divisor / dex(clarity),
+        };
+        const complex<dex> cursorOffsetFromReference = cursorOffsetFromCurrent + perturbator->off;
+
+        // Imagina searches at two cursor-centred radii: 1/24 and 1/12 in its
+        // normalized coordinates, equivalent to 1/48 and 1/24 of the view height.
+        const int maximumRadius = std::max(4, std::min(width, height) / 24);
+        const int minimumRadius = std::max(2, maximumRadius / 2);
+        const std::array radii = {minimumRadius, maximumRadius};
+        GuidedZoomTarget selected = {};
+        double selectedDistance = 0;
+
+        for (const int radiusPixels: radii) {
+            const dex radius = dex(static_cast<double>(radiusPixels)) / divisor / dex(clarity);
+            const std::optional feature = MandelbrotFeatureFinder::find(*data, cursorOffsetFromReference, radius);
+            if (!feature)
+                continue;
+
+            const complex<dex> offsetFromCurrent = feature->offsetFromReference - perturbator->off;
+            const double featureX = static_cast<double>(offsetFromCurrent.re * divisor * dex(clarity)) +
+                                    static_cast<double>(width) / 2.0;
+            const double featureY = static_cast<double>(offsetFromCurrent.im * divisor * dex(clarity)) +
+                                    static_cast<double>(height) / 2.0;
+            const double distance =
+                    std::hypot(featureX - static_cast<double>(cursorX), featureY - static_cast<double>(cursorY));
+            if (!selected.found || feature->estimatedSize > selected.estimatedSize ||
+                (feature->estimatedSize == selected.estimatedSize && distance < selectedDistance)) {
+                selected = {
+                        static_cast<float>(featureX),
+                        static_cast<float>(featureY),
+                        feature->preperiod,
+                        feature->period,
+                        feature->estimatedSize,
+                        feature->kind == MandelbrotFeatureFinder::Kind::MISIUREWICZ,
+                        true,
+                };
+                selectedDistance = distance;
+            }
+        }
+        return selected;
+    }
+
+    void RFF2::refreshGuidedZoomTarget(const int mouseX, const int mouseY) {
+        if (!guidedZoom || !mouseInsideWindow || isNavigationLocked() || ImGui::GetIO().WantCaptureMouse) {
+            guidedZoomTarget = {};
+            guidedZoomTargetCached = false;
+            return;
+        }
+        if (!idleCompute.load())
+            return;
+
+        constexpr int CURSOR_QUANTIZATION = 4;
+        constexpr double MINIMUM_SEARCH_INTERVAL = 0.075;
+        const int quantizedX = mouseX / CURSOR_QUANTIZATION * CURSOR_QUANTIZATION;
+        const int quantizedY = mouseY / CURSOR_QUANTIZATION * CURSOR_QUANTIZATION;
+        const uint64_t render = completedRenderCount.load();
+        if (guidedZoomTargetCached && guidedZoomMouseX == quantizedX && guidedZoomMouseY == quantizedY &&
+            guidedZoomTargetRender == render) {
+            return;
+        }
+
+        const double now = rootWindowContext->getWindow()->getTime();
+        if (guidedZoomTargetCached && guidedZoomTargetRender == render &&
+            now - guidedZoomLastSearchTime < MINIMUM_SEARCH_INTERVAL) {
+            return;
+        }
+
+        guidedZoomMouseX = static_cast<int16_t>(quantizedX);
+        guidedZoomMouseY = static_cast<int16_t>(quantizedY);
+        guidedZoomTargetRender = render;
+        guidedZoomLastSearchTime = now;
+        guidedZoomTarget = findGuidedZoomTarget(quantizedX, quantizedY);
+        guidedZoomTargetCached = true;
+    }
+
+    void RFF2::renderGuidedZoomOverlay() {
+        if (!guidedZoom || !mouseInsideWindow || isNavigationLocked() || ImGui::GetIO().WantCaptureMouse) {
+            guidedZoomTarget = {};
+            guidedZoomTargetCached = false;
+            return;
+        }
+
+        double mouseWindowX;
+        double mouseWindowY;
+        glfwGetCursorPos(rootWindowContext->getWindow()->getWindow(), &mouseWindowX, &mouseWindowY);
+        refreshGuidedZoomTarget(getMouseXOnIterationBuffer(static_cast<int>(mouseWindowX)),
+                                getMouseYOnIterationBuffer(static_cast<int>(mouseWindowY)));
+        if (!guidedZoomTarget.found)
+            return;
+
+        const float clarity = std::max(settings.render.clarityMultiplier, 0.001f);
+        const ImVec2 cursor = {static_cast<float>(mouseWindowX), static_cast<float>(mouseWindowY)};
+        const ImVec2 feature = {
+                guidedZoomTarget.x / clarity,
+                static_cast<float>(getIterationBufferHeight() - guidedZoomTarget.y) / clarity,
+        };
+        const ImU32 color = IM_COL32(255, 255, 255, 230);
+        const std::string label = guidedZoomTarget.misiurewicz
+                                          ? std::format("M {}+{}", guidedZoomTarget.preperiod, guidedZoomTarget.period)
+                                          : std::format("P {}", guidedZoomTarget.period);
+        ImDrawList *drawList = ImGui::GetForegroundDrawList();
+        drawList->AddLine(cursor, feature, color, 2.0f);
+        drawList->AddText({feature.x + 8.0f, feature.y - 8.0f}, color, label.c_str());
+    }
+
 
     void RFF2::addListeners() {
         Application::addListeners();
         auto &eventSystem = rootWindowContext->getWindow()->eventSystem;
 
-        eventSystem.mouse.onMouseEnter.add(
-                [this] { glfwSetCursor(cursorManager->window, cursorManager->crosshairCursor); });
-        eventSystem.mouse.onMouseExit.add([this] { glfwSetCursor(cursorManager->window, nullptr); });
+        eventSystem.mouse.onMouseEnter.add([this] {
+            mouseInsideWindow = true;
+            glfwSetCursor(cursorManager->window, cursorManager->crosshairCursor);
+        });
+        eventSystem.mouse.onMouseExit.add([this] {
+            mouseInsideWindow = false;
+            guidedZoomTarget = {};
+            guidedZoomTargetCached = false;
+            glfwSetCursor(cursorManager->window, nullptr);
+        });
 
 
         eventSystem.mouse.onMouseMove.add([this](const int mx, const int my) {
@@ -235,6 +373,8 @@ namespace merutilm::rff2 {
 
         eventSystem.mouseDrag.onMouseDrag.add(
                 [this](const int mb, const int mx, const int my, const int mdx, const int mdy) {
+                    if (isNavigationLocked())
+                        return;
                     const int16_t x = getMouseXOnIterationBuffer(mx);
                     const int16_t y = getMouseYOnIterationBuffer(my);
                     const auto dx = static_cast<int16_t>(getMouseXOnIterationBuffer(mx - mdx) - x);
@@ -261,6 +401,8 @@ namespace merutilm::rff2 {
                     }
                 });
         eventSystem.mouseWheel.onMouseScroll.add([this](const int value) {
+            if (isNavigationLocked())
+                return;
             settings.fractal.general.logZoom = std::max(Constants::Fractal::ZOOM_MIN, settings.fractal.general.logZoom);
             double mdx;
             double mdy;
@@ -269,12 +411,47 @@ namespace merutilm::rff2 {
             const int my = static_cast<int>(mdy);
             const int16_t mix = getMouseXOnIterationBuffer(mx);
             const int16_t miy = getMouseYOnIterationBuffer(my);
-            zoom(mix, miy, value > 0 ? Constants::Fractal::ZOOM_INTERVAL : -Constants::Fractal::ZOOM_INTERVAL);
+            const float increment = value > 0 ? Constants::Fractal::ZOOM_INTERVAL : -Constants::Fractal::ZOOM_INTERVAL;
+            int16_t anchorX = mix;
+            int16_t anchorY = miy;
+            bool featureRedirected = false;
+
+            if (guidedZoom) {
+                refreshGuidedZoomTarget(mix, miy);
+                if (value > 0 && guidedZoomTarget.found) {
+                    const double scale = std::pow(10.0, static_cast<double>(increment));
+                    const double inverseScaleDifference = 1.0 / (scale - 1.0);
+                    const double redirectedAnchorX =
+                            (scale * static_cast<double>(guidedZoomTarget.x) - static_cast<double>(mix)) *
+                            inverseScaleDifference;
+                    const double redirectedAnchorY =
+                            (scale * static_cast<double>(guidedZoomTarget.y) - static_cast<double>(miy)) *
+                            inverseScaleDifference;
+
+                    // An off-centre zoom can move a feature to the stationary cursor
+                    // exactly. If that requires an anchor outside the view, leave this
+                    // wheel step cursor-centred instead of making a wild jump.
+                    if (redirectedAnchorX >= 0.0 && redirectedAnchorX < getIterationBufferWidth() &&
+                        redirectedAnchorY >= 0.0 && redirectedAnchorY < getIterationBufferHeight()) {
+                        anchorX = static_cast<int16_t>(std::lround(redirectedAnchorX));
+                        anchorY = static_cast<int16_t>(std::lround(redirectedAnchorY));
+                        featureRedirected = true;
+                    }
+                }
+            }
+
+            zoom(anchorX, anchorY, increment, false);
+
+            if (featureRedirected) {
+                const float scale = std::pow(10.0f, increment);
+                guidedZoomTarget.x = scale * guidedZoomTarget.x + (1.0f - scale) * anchorX;
+                guidedZoomTarget.y = scale * guidedZoomTarget.y + (1.0f - scale) * anchorY;
+            }
         });
     }
 
 
-    void RFF2::zoom(const int16_t px, const int16_t py, const float logIncrement) {
+    void RFF2::zoom(const int16_t px, const int16_t py, const float logIncrement, const bool requestRender) {
 
         settings.fractal.general.logZoom = std::max(Constants::Fractal::ZOOM_MIN, settings.fractal.general.logZoom);
         const int16_t mix = px;
@@ -298,7 +475,12 @@ namespace merutilm::rff2 {
         zoomAnimationInfo.stop();
         zoomAnimationInfo.targetLogZoomOffsetAim += logIncrement;
         zoomAnimationInfo.targetMouseZoomOffsetAim += glm::vec2{mxr * dz * (mz - 1), myr * dz * (1 - mz)};
-        requests.requestRecompute();
+        if (requestRender) {
+            requests.requestRecompute();
+        } else {
+            wheelZoomRenderPending = true;
+            wheelZoomLastInputTime = rootWindowContext->getWindow()->getTime();
+        }
     }
 
 
@@ -358,7 +540,7 @@ namespace merutilm::rff2 {
         const float dt = t - time;
         time = t;
 
-        if (canShowPreview && !zoomAnimationInfo.aimChanged) {
+        if (canShowPreview && !wheelZoomRenderPending && !zoomAnimationInfo.aimChanged) {
             renderer->iterationStagingBufferContext->fill();
             renderer->rg0->iterationPalette->applyMaxIteration();
             zoomAnimationInfo.reset();
@@ -451,66 +633,85 @@ namespace merutilm::rff2 {
 
         renderControlImGui();
         renderStatusImGui();
+        renderGuidedZoomOverlay();
     }
 
     void RFF2::renderControlImGui() {
         ImGui::Begin("Control");
+        const bool controlsLocked = isNavigationLocked();
         if (ImGui::BeginTabBar("Control")) {
             if (ImGui::BeginTabItem("File")) {
+                ImGui::BeginDisabled(controlsLocked);
                 FnFile::saveMap(*this);
                 FnFile::saveImage(*this);
                 FnFile::saveLocation(*this);
                 FnFile::loadMap(*this);
                 FnFile::loadLocation(*this);
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Fractal")) {
+                ImGui::BeginDisabled(controlsLocked);
                 FnFractal::reference(*this);
                 FnFractal::iterations(*this);
                 // FnFractal::sa(*this);
                 FnFractal::mpa(*this);
                 FnFractal::automaticIterations(*this);
                 FnFractal::absoluteIterationMode(*this);
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Render")) {
+                ImGui::BeginDisabled(controlsLocked);
                 FnRender::setResolutionProperties(*this);
                 FnRender::setRenderProperties(*this);
                 FnRender::linearInterpolation(*this);
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Presets")) {
+                ImGui::BeginDisabled(controlsLocked);
                 FnPreset::calculation(*this);
                 FnPreset::render(*this);
                 FnPreset::resolution(*this);
                 FnPreset::shader(*this);
 
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Shader")) {
+                ImGui::BeginDisabled(controlsLocked);
                 FnShader::palette(*this);
                 FnShader::stripe(*this);
                 FnShader::slope(*this);
                 FnShader::color(*this);
                 FnShader::fog(*this);
                 FnShader::bloom(*this);
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Video")) {
+                ImGui::BeginDisabled(controlsLocked);
                 FnVideo::dataSettings(*this);
                 FnVideo::animationSettings(*this);
                 FnVideo::exportSettings(*this);
                 FnVideo::generateVidKeyframes(*this);
                 FnVideo::exportZoomVideo(*this);
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Explore")) {
+                ImGui::BeginDisabled(controlsLocked);
                 FnExplore::recompute(*this);
                 FnExplore::reset(*this);
                 FnExplore::cancelRender(*this);
                 FnExplore::locateCenteredReference(*this);
+                FnExplore::guidedZoom(*this);
+                ImGui::EndDisabled();
                 FnExplore::locateMinibrot(*this);
+                ImGui::BeginDisabled(controlsLocked);
                 FnExplore::autoExplorer(*this);
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -829,6 +1030,8 @@ namespace merutilm::rff2 {
         }
         idleCompute = true;
         ++completedRenderCount;
+        if (unlockNavigationAfterRender.exchange(false))
+            navigationLocked = false;
         backgroundThreads.notifyAll();
     }
 } // namespace merutilm::rff2

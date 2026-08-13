@@ -28,6 +28,7 @@ add_executable(
         src/rff2/ui/FnRender.cpp
         src/rff2/ui/FnShader.cpp
         src/rff2/mb/MB2Locator.cpp
+        src/rff2/mb/MandelbrotFeatureFinder.cpp
         src/rff2/ui/FnExplore.cpp
         src/rff2/ui/AutoExplorer.cpp
         src/rff2/preset/shader/palette/ShdPalettePresets.cpp

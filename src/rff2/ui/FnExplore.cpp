@@ -197,11 +197,13 @@ namespace merutilm::rff2 {
                                                                           : SIZE_FACTOR_VALUES[sizeFactorPreset]);
                         const int runAction = action;
                         const int runTarget = zoomTarget;
+                        app.beginNewtonNavigationLock();
                         newtonRunning = true;
                         setNewtonStatus("Starting Newton center search...");
 
                         app.getState().createThread([&app, data, cache, &settings, period, runAction, runTarget,
                                                      runStart, folding, power, sizeFactor] {
+                            bool resultRenderRequested = false;
                             try {
                                 auto centerProgress = [&app, period](const uint64_t p, const int pass) {
                                     static float lastUpdate = 0;
@@ -225,7 +227,9 @@ namespace merutilm::rff2 {
                                     } else {
                                         settings.fractal.reference.center = centered->fractalSettings.reference.center;
                                         setNewtonStatus("Center found. Rendering centered view...");
+                                        app.unlockNavigationWhenRenderFinishes();
                                         app.getRequests().requestRecompute();
+                                        resultRenderRequested = true;
                                     }
                                 } else {
                                     std::unique_ptr<MB2Locator> locator = MB2Locator::locateMinibrot(
@@ -254,7 +258,9 @@ namespace merutilm::rff2 {
                                                 std::max(Constants::Fractal::ZOOM_MIN, targetZoom);
                                         setNewtonStatus(std::format("Done. Minibrot log zoom {:.4f}; view {:.4f}",
                                                                     minibrotZoom, settings.fractal.general.logZoom));
+                                        app.unlockNavigationWhenRenderFinishes();
                                         app.getRequests().requestRecompute();
+                                        resultRenderRequested = true;
                                     }
                                 }
                             } catch (const std::exception &e) {
@@ -262,6 +268,8 @@ namespace merutilm::rff2 {
                             } catch (...) {
                                 setNewtonStatus("Newton search failed with an unknown error.");
                             }
+                            if (!resultRenderRequested)
+                                app.unlockNavigationNow();
                             newtonRunning = false;
                         });
                     }
@@ -284,6 +292,14 @@ namespace merutilm::rff2 {
             showNewtonWindow = false;
         }
         ImGui::End();
+    }
+
+    void FnExplore::guidedZoom(RFF2 &app) {
+        bool enabled = app.isGuidedZoomEnabled();
+        if (ImGui::Checkbox("Guided Zoom", &enabled))
+            app.setGuidedZoomEnabled(enabled);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Move the largest nearby feature under the stationary cursor while zooming in");
     }
 
     void FnExplore::autoExplorer(RFF2 &app) {

@@ -21,6 +21,15 @@
 
 namespace merutilm::rff2 {
     class RFF2 final : public vkh::Application {
+        struct GuidedZoomTarget {
+            float x = 0;
+            float y = 0;
+            uint64_t preperiod = 0;
+            uint64_t period = 0;
+            dex estimatedSize = dex::ZERO;
+            bool misiurewicz = false;
+            bool found = false;
+        };
 
         ParallelRenderState state = {};
         Settings settings;
@@ -30,6 +39,8 @@ namespace merutilm::rff2 {
         std::atomic<bool> idleCompute = true;
         std::atomic<uint64_t> completedRenderCount = 0;
         std::atomic<bool> canShowPreview = false;
+        std::atomic<bool> navigationLocked = false;
+        std::atomic<bool> unlockNavigationAfterRender = false;
 
         std::array<std::string, Constants::Status::LENGTH> statusMessages = {};
         std::unique_ptr<Matrix<double>> iterationMatrix = nullptr;
@@ -41,6 +52,16 @@ namespace merutilm::rff2 {
         VideoProgressInfo videoProgressInfo = {};
         BackgroundThreads backgroundThreads = BackgroundThreads();
         AutoExplorer autoExplorer;
+        bool guidedZoom = true;
+        bool guidedZoomTargetCached = false;
+        bool mouseInsideWindow = false;
+        int16_t guidedZoomMouseX = 0;
+        int16_t guidedZoomMouseY = 0;
+        uint64_t guidedZoomTargetRender = 0;
+        double guidedZoomLastSearchTime = -1;
+        GuidedZoomTarget guidedZoomTarget = {};
+        bool wheelZoomRenderPending = false;
+        double wheelZoomLastInputTime = -1;
 
     public:
         explicit RFF2(const vkh::WindowInitializerSettings &wic) : Application(wic), settings(genDefaultSettings()) {
@@ -75,7 +96,7 @@ namespace merutilm::rff2 {
 
         void addListeners() override;
 
-        void zoom(int16_t px, int16_t py, float logIncrement);
+        void zoom(int16_t px, int16_t py, float logIncrement, bool requestRender = true);
 
         void applyDefaultSettings();
 
@@ -116,6 +137,8 @@ namespace merutilm::rff2 {
         [[nodiscard]] Settings &getSettings() {
             return settings;
         }
+
+        [[nodiscard]] const Settings &getSettings() const { return settings; }
 
         [[nodiscard]] ParallelRenderState &getState() {
             return state;
@@ -160,6 +183,34 @@ namespace merutilm::rff2 {
 
         [[nodiscard]] AutoExplorer &getAutoExplorer() { return autoExplorer; }
 
+        [[nodiscard]] bool isGuidedZoomEnabled() const { return guidedZoom; }
+
+        void setGuidedZoomEnabled(const bool enabled) {
+            guidedZoom = enabled;
+            if (!enabled) {
+                guidedZoomTarget = {};
+                guidedZoomTargetCached = false;
+            }
+        }
+
+        [[nodiscard]] bool isNavigationLocked() const { return navigationLocked.load(); }
+
+        void beginNewtonNavigationLock() {
+            navigationLocked = true;
+            unlockNavigationAfterRender = false;
+            wheelZoomRenderPending = false;
+            requests.recomputeRequested = false;
+            guidedZoomTarget = {};
+            guidedZoomTargetCached = false;
+        }
+
+        void unlockNavigationNow() {
+            unlockNavigationAfterRender = false;
+            navigationLocked = false;
+        }
+
+        void unlockNavigationWhenRenderFinishes() { unlockNavigationAfterRender = true; }
+
 
         [[nodiscard]] vkh::WindowContext &getWindowContext() const {
             return *rootWindowContext;
@@ -184,6 +235,9 @@ namespace merutilm::rff2 {
 
 
     private:
+        [[nodiscard]] GuidedZoomTarget findGuidedZoomTarget(int mouseX, int mouseY) const;
+        void refreshGuidedZoomTarget(int mouseX, int mouseY);
+        void renderGuidedZoomOverlay();
         static void initImGui();
         void renderControlImGui();
         void renderStatusImGui() const;
