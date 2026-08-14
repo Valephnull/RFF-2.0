@@ -31,6 +31,7 @@ add_executable(
         src/rff2/mb/MandelbrotFeatureFinder.cpp
         src/rff2/ui/FnExplore.cpp
         src/rff2/ui/AutoExplorer.cpp
+        src/rff2/ui/CrashRecovery.cpp
         src/rff2/preset/shader/palette/ShdPalettePresets.cpp
         src/rff2/preset/shader/fog/ShdFogPresets.cpp
         src/rff2/preset/shader/color/ShdColorPresets.cpp

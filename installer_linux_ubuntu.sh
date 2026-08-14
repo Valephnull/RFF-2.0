@@ -84,7 +84,12 @@ if [[ -f "$version_file" ]]; then
     installed_sha="$(tr -d '[:space:]' < "$version_file")"
 fi
 
-if [[ "$installed_sha" == "$newest_sha" && -x "$install_root/bin/RFF" ]]; then
+install_complete=true
+for name in "${target_dirs[@]}"; do
+    [[ -e "$install_root/$name" ]] || install_complete=false
+done
+
+if [[ "$installed_sha" == "$newest_sha" && "$install_complete" == true && -x "$install_root/bin/RFF" ]]; then
     printf '\033[32mRFF-EXP is already up to date (%s).\033[0m\n' "${newest_sha:0:7}"
     if [[ -t 0 ]]; then
         read -r -p "Press Enter to exit" _ || true
@@ -226,5 +231,5 @@ if [[ -t 0 ]]; then
     read -r -p "Launch RFF-EXP now? [y/N] " launch || true
 fi
 if [[ "$launch" =~ ^[Yy]$ ]]; then
-    (cd "$install_root" && ./bin/RFF)
+    (cd "$install_root/bin" && ./RFF)
 fi

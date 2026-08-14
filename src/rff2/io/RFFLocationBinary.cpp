@@ -4,6 +4,7 @@
 
 #include "RFFLocationBinary.h"
 
+#include <cmath>
 #include <utility>
 
 #include "../constants/FileConstants.hpp"
@@ -11,6 +12,25 @@
 #include "vulkan_helper/base/logger.hpp"
 
 namespace merutilm::rff2 {
+    namespace {
+        constexpr uint64_t MAX_COORDINATE_TEXT_LENGTH = 1U << 20;
+
+        template<typename T>
+        [[nodiscard]] bool readExact(std::ifstream &input, T &value) {
+            input.read(reinterpret_cast<char *>(&value), sizeof(T));
+            return static_cast<bool>(input);
+        }
+
+        [[nodiscard]] bool readText(std::ifstream &input, std::string &value) {
+            uint64_t length = 0;
+            if (!readExact(input, length) || length == 0 || length > MAX_COORDINATE_TEXT_LENGTH)
+                return false;
+            value.resize(static_cast<size_t>(length));
+            input.read(value.data(), static_cast<std::streamsize>(length));
+            return static_cast<bool>(input);
+        }
+    } // namespace
+
     inline const RFFLocationBinary RFFLocationBinary::DEFAULT = RFFLocationBinary(0, "", "", 0);
 
     RFFLocationBinary::RFFLocationBinary(const float logZoom, std::string real, std::string imag,
@@ -27,23 +47,14 @@ namespace merutilm::rff2 {
         if (!in.is_open()) {
             return DEFAULT;
         }
-        float logZoom;
-        IOUtilities::readAndDecode(in, &logZoom);
-        uint64_t maxIteration;
-        IOUtilities::readAndDecode(in, &maxIteration);
-        uint64_t len;
-        IOUtilities::readAndDecode(in, &len);
-        std::vector<char> re(len);
-        IOUtilities::readAndDecode(in, len, re.data());
-        IOUtilities::readAndDecode(in, &len);
-        std::vector<char> im(len);
-        IOUtilities::readAndDecode(in, len, im.data());
-
-        re.push_back('\0');
-        im.push_back('\0');
-
-        std::string real = re.data();
-        std::string imag = im.data();
+        float logZoom = 0;
+        uint64_t maxIteration = 0;
+        std::string real;
+        std::string imag;
+        if (!readExact(in, logZoom) || !readExact(in, maxIteration) || !std::isfinite(logZoom) ||
+            maxIteration == 0 || !readText(in, real) || !readText(in, imag)) {
+            return DEFAULT;
+        }
 
         return RFFLocationBinary(logZoom, std::move(real), std::move(imag), maxIteration);
     }

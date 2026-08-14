@@ -48,6 +48,7 @@ namespace merutilm::rff2 {
         refreshResizeParams(rootWindowContext->getSwapchain().getSwapchainExtent());
         requests.requestRecompute();
         initImGui();
+        crashRecovery.initialize();
         NFD::Init();
     }
 
@@ -65,6 +66,7 @@ namespace merutilm::rff2 {
     void RFF2::onQuit() {
         autoExplorer.stop();
         state.cancel();
+        crashRecovery.cleanShutdown();
         renderer = nullptr;
         NFD::Quit();
     }
@@ -114,6 +116,7 @@ namespace merutilm::rff2 {
         }
 
         autoExplorer.update(*this);
+        crashRecovery.update(*this);
 
         invokeUpdaters();
         renderer->render();
@@ -154,7 +157,8 @@ namespace merutilm::rff2 {
                            .bloom = BloomPresets::Disabled().genBloom()},
                 .video = {.data = {.defaultZoomIncrement = 2, .isStatic = false},
                           .animation = {.overZoom = 2, .showText = true, .mps = 1},
-                          .exportation = {.fps = 60, .bitrate = 9000}}};
+                          .exportation = {.fps = 60, .bitrate = 9000}},
+                .explore = {.autoMoveCursorToCenter = true}};
 #else
         return Settings{
                 .fractal =
@@ -190,19 +194,30 @@ namespace merutilm::rff2 {
                            .bloom = BloomPresets::Disabled().genBloom()},
                 .video = {.data = {.defaultZoomIncrement = 2, .isStatic = false},
                           .animation = {.overZoom = 2, .showText = true, .mps = 1},
-                          .exportation = {.fps = 60, .bitrate = 9000}}};
+                          .exportation = {.fps = 60, .bitrate = 9000}},
+                .explore = {.autoMoveCursorToCenter = true}};
 #endif
     }
 
-    complex<dex> RFF2::offsetConversion(const Settings &s, const int mx, const int my) const {
-        using namespace Constants::Fractal;
-        const double ox = static_cast<double>(mx) - static_cast<double>(getIterationBufferWidth()) / 2.0;
-        const double oy = static_cast<double>(my) - static_cast<double>(getIterationBufferHeight()) / 2.0;
+    complex<dex> RFF2::offsetConversion(const Settings &s, const int px, const int py) const {
+        const double bufOffX = static_cast<double>(px) - static_cast<double>(getIterationBufferWidth()) / 2.0;
+        const double bufOffY = static_cast<double>(py) - static_cast<double>(getIterationBufferHeight()) / 2.0;
+        return complex(dex(bufOffX), dex(bufOffY)) / getDivisor(s) / dex(s.render.clarityMultiplier);
+    }
 
-        return {dex(std::abs(ox) < INTENTIONAL_ERROR_OFFSET_MIN_PIX ? INTENTIONAL_ERROR_OFFSET_MIN_PIX : ox) /
-                        getDivisor(s) / dex(s.render.clarityMultiplier),
-                dex(std::abs(oy) < INTENTIONAL_ERROR_OFFSET_MIN_PIX ? INTENTIONAL_ERROR_OFFSET_MIN_PIX : oy) /
-                        getDivisor(s) / dex(s.render.clarityMultiplier)};
+    std::array<int, 2> RFF2::iterationBufferConversion(const Settings &s, const complex<dex> &offset) const {
+        const auto [re, im] = static_cast<complex<double>>(offset * dex(s.render.clarityMultiplier) * getDivisor(s));
+
+        const int px = static_cast<int>((re < 0 ? std::round(re) : std::ceil(re)) + getIterationBufferWidth() / 2.0);
+        const int py = static_cast<int>((im < 0 ? std::round(im) : std::ceil(im)) + getIterationBufferHeight() / 2.0);
+        return {px, py};
+    }
+
+    void RFF2::moveCursor(const int px, const int py) const {
+        const int mx = px / settings.render.clarityMultiplier;
+        const int my = py / settings.render.clarityMultiplier;
+        glfwSetCursorPos(rootWindowContext->getWindow()->getWindow(), mx,
+                         rootWindowContext->getSwapchain().getSwapchainExtent().height - my);
     }
 
     dex RFF2::getDivisor(const Settings &settings) { return dex_exp::exp10(settings.fractal.general.logZoom); }
@@ -227,7 +242,8 @@ namespace merutilm::rff2 {
     RFF2::GuidedZoomTarget RFF2::findGuidedZoomTarget(const int mouseX, const int mouseY) const {
         const MB2RenderDataBase *data = renderData.get();
         const MB2PerturbatorBase *perturbator = data ? data->getPerturbator() : nullptr;
-        if (!guidedZoom || !idleCompute.load() || !data || !data->getReference() || !perturbator)
+        if (!settings.explore.autoMoveCursorToCenter || !idleCompute.load() || !data || !data->getReference() ||
+            !perturbator)
             return {};
 
         const int width = getIterationBufferWidth();
@@ -249,6 +265,24 @@ namespace merutilm::rff2 {
         const std::array radii = {minimumRadius, maximumRadius};
         GuidedZoomTarget selected = {};
         double selectedDistance = 0;
+
+        // Prefer Merutilm's auto-aim center whenever it is visible. The older
+        // Imagina-inspired nearby-feature search remains as an off-screen fallback.
+        if (const std::unique_ptr<fixed_point_complex_i1> centerOffset = MB2Locator::findCenterOffset(*data)) {
+            complex<dex> offsetFromCurrent = static_cast<complex<dex>>(*centerOffset) - perturbator->off;
+            const std::array centerPixel = iterationBufferConversion(settings, offsetFromCurrent);
+            if (centerPixel[0] >= 0 && centerPixel[1] >= 0 && centerPixel[0] < width && centerPixel[1] < height) {
+                return {
+                        static_cast<float>(centerPixel[0]),
+                        static_cast<float>(centerPixel[1]),
+                        0,
+                        data->getReference()->longestPeriod(),
+                        dex::ONE,
+                        false,
+                        true,
+                };
+            }
+        }
 
         for (const int radiusPixels: radii) {
             const dex radius = dex(static_cast<double>(radiusPixels)) / divisor / dex(clarity);
@@ -281,7 +315,8 @@ namespace merutilm::rff2 {
     }
 
     void RFF2::refreshGuidedZoomTarget(const int mouseX, const int mouseY) {
-        if (!guidedZoom || !mouseInsideWindow || isNavigationLocked() || ImGui::GetIO().WantCaptureMouse) {
+        if (!settings.explore.autoMoveCursorToCenter || !mouseInsideWindow || isNavigationLocked() ||
+            ImGui::GetIO().WantCaptureMouse) {
             guidedZoomTarget = {};
             guidedZoomTargetCached = false;
             return;
@@ -314,7 +349,8 @@ namespace merutilm::rff2 {
     }
 
     void RFF2::renderGuidedZoomOverlay() {
-        if (!guidedZoom || !mouseInsideWindow || isNavigationLocked() || ImGui::GetIO().WantCaptureMouse) {
+        if (!settings.explore.autoMoveCursorToCenter || !mouseInsideWindow || isNavigationLocked() ||
+            ImGui::GetIO().WantCaptureMouse) {
             guidedZoomTarget = {};
             guidedZoomTargetCached = false;
             return;
@@ -416,7 +452,7 @@ namespace merutilm::rff2 {
             int16_t anchorY = miy;
             bool featureRedirected = false;
 
-            if (guidedZoom) {
+            if (settings.explore.autoMoveCursorToCenter) {
                 refreshGuidedZoomTarget(mix, miy);
                 if (value > 0 && guidedZoomTarget.found) {
                     const double scale = std::pow(10.0, static_cast<double>(increment));
@@ -547,6 +583,7 @@ namespace merutilm::rff2 {
         }
 
         zoomAnimationInfo.update(dt);
+
         renderer->rccPresentPrepare->smoothZoom->setSmoothZoomData(zoomAnimationInfo.targetMouseDragOffset +
                                                                            zoomAnimationInfo.targetMouseZoomOffset,
                                                                    zoomAnimationInfo.targetLogZoomOffset);
@@ -556,13 +593,10 @@ namespace merutilm::rff2 {
         rootWindowContext->core.getLogicalDevice().waitDeviceIdle();
         renderer->rg0->iterationPalette->setPalette(s.shader.palette);
         renderer->rg0->stripe->setStripe(s.shader.stripe);
-        renderer->rg0->slope->setSlope(s.shader.slope);
         renderer->rg0->color->setColor(s.shader.color);
         renderer->rg3->fog->setFog(s.shader.fog);
         renderer->rg4->bloom->setBloom(s.shader.bloom);
         renderer->rg4->linearInterpolation->setLinearInterpolation(s.render.linearInterpolation);
-        renderer->computeBoxBlur->setBlurInfo(CPCBoxBlur::DESC_INDEX_BLUR_TARGET_FOG, s.shader.fog.radius);
-        renderer->computeBoxBlur->setBlurInfo(CPCBoxBlur::DESC_INDEX_BLUR_TARGET_BLOOM, s.shader.bloom.radius);
     }
 
     void RFF2::refreshResizeParams(const VkExtent2D swapchainExtent) {
@@ -581,11 +615,13 @@ namespace merutilm::rff2 {
         renderer->rg0->iterationPalette->resetIterationBuffer(iw, ih);
         iterationMatrix = std::make_unique<Matrix<double>>(iw, ih);
         renderer->iterationStagingBufferContext = std::make_unique<GraphicsMatrixBuffer<double>>(
-                rootWindowContext->core, iw, ih, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                rootWindowContext->core, iw, ih, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
 
     void RFF2::registerRenderers() {
-        renderer = registerRenderer<AppRenderer>(*engine, *rootWindowContext, settings, [this] { renderImGui(); });
+        renderer = registerRenderer<AppRenderer>(*engine, *rootWindowContext, settings, zoomAnimationInfo,
+                                                 [this] { renderImGui(); });
         createImGuiContext(renderer->imguiRenderContext);
     }
 
@@ -634,6 +670,7 @@ namespace merutilm::rff2 {
         renderControlImGui();
         renderStatusImGui();
         renderGuidedZoomOverlay();
+        crashRecovery.renderImGui(*this);
     }
 
     void RFF2::renderControlImGui() {
@@ -654,7 +691,7 @@ namespace merutilm::rff2 {
                 ImGui::BeginDisabled(controlsLocked);
                 FnFractal::reference(*this);
                 FnFractal::iterations(*this);
-                // FnFractal::sa(*this);
+                FnFractal::sa(*this);
                 FnFractal::mpa(*this);
                 FnFractal::automaticIterations(*this);
                 FnFractal::absoluteIterationMode(*this);
@@ -705,8 +742,11 @@ namespace merutilm::rff2 {
                 FnExplore::recompute(*this);
                 FnExplore::reset(*this);
                 FnExplore::cancelRender(*this);
+                FnExplore::moveCursorToCenter(*this);
+                FnExplore::reuseReference(*this);
+                FnExplore::moveToCenter(*this);
+                FnExplore::goToOriginalReference(*this);
                 FnExplore::locateCenteredReference(*this);
-                FnExplore::guidedZoom(*this);
                 ImGui::EndDisabled();
                 FnExplore::locateMinibrot(*this);
                 ImGui::BeginDisabled(controlsLocked);
@@ -836,8 +876,29 @@ namespace merutilm::rff2 {
         });
     }
 
-    void RFF2::beforeIterationFill() const {
+    void RFF2::moveCursorToCenter() const {
+        const std::unique_ptr<fixed_point_complex_i1> off = MB2Locator::findCenterOffset(*renderData);
+        if (!off)
+            return;
+        auto offDex = static_cast<complex<dex>>(*off);
+        if (renderData->getPerturbator()) {
+            offDex -= renderData->getPerturbator()->off;
+        }
+        const int width = getIterationBufferWidth();
+        const int height = getIterationBufferHeight();
 
+        // multiplying 1.01 to attract reference center to client center
+        const std::array<int, 2> ib = iterationBufferConversion(settings, offDex * dex(1.01));
+
+        if (ib[0] >= 0 && ib[1] >= 0 && ib[0] < width && ib[1] < height) {
+            moveCursor(ib[0], ib[1]);
+        }
+    }
+
+    void RFF2::beforeIterationFill() const {
+        if (settings.explore.autoMoveCursorToCenter) {
+            moveCursorToCenter();
+        }
         renderer->rg0->iterationPalette->setMaxIterationTemp(
                 static_cast<double>(renderData->fractalSettings.perturb.maxIteration));
     }
@@ -864,43 +925,16 @@ namespace merutilm::rff2 {
             capacity = renderData->getReference()->length();
         }
 
-        std::function actionPerRefCalcIteration = [this, startTime](const uint64_t p) mutable {
-            static float time = rootWindowContext->getWindow()->getTime();
-            const float elapsed = rootWindowContext->getWindow()->getTime() - time;
-            if (elapsed > Constants::Status::UI_REFRESH_INTERVAL) {
-                time = rootWindowContext->getWindow()->getTime();
-                setStatusMessage(Constants::Status::RENDER_STATUS, std::format(std::locale(), "Period : {:L}", p));
-                setStatusMessage(Constants::Status::TIME_STATUS,
-                                 std::format("Time : {}", Utilities::formatTime(time - startTime)));
-            }
-        };
-        std::function actionPerSeriesApproxIteration = [this, startTime](const uint64_t p, const double i) mutable {
-            static float time = rootWindowContext->getWindow()->getTime();
-            const float elapsed = rootWindowContext->getWindow()->getTime() - time;
-            if (elapsed > Constants::Status::UI_REFRESH_INTERVAL) {
-                time = rootWindowContext->getWindow()->getTime();
-                setStatusMessage(Constants::Status::RENDER_STATUS,
-                                 std::format("Series-Approximation : {:.3f}%", i * 100));
-                setStatusMessage(Constants::Status::TIME_STATUS,
-                                 std::format("Time : {}", Utilities::formatTime(time - startTime)));
-            }
-        };
-        std::function actionPerCreatingTableIteration = [this, startTime](const uint64_t p, const double i) mutable {
-            static float time = rootWindowContext->getWindow()->getTime();
-            const float elapsed = rootWindowContext->getWindow()->getTime() - time;
-            if (elapsed > Constants::Status::UI_REFRESH_INTERVAL) {
-                time = rootWindowContext->getWindow()->getTime();
-                setStatusMessage(Constants::Status::RENDER_STATUS, std::format("MP-Approximation : {:.3f}%", i * 100));
-                setStatusMessage(Constants::Status::TIME_STATUS,
-                                 std::format("Time : {}", Utilities::formatTime(time - startTime)));
-            }
-        };
+        std::function actionPerRefCalcIteration = FnExplore::getActionWhileRefCalc(*this, startTime);
+        std::function actionPerSeriesApproxIteration = FnExplore::getActionWhileSeriesApprox(*this, startTime);
+        std::function actionPerCreatingTableIteration = FnExplore::getActionWhileCreatingTable(*this, startTime);
 
 
         if (state.interruptRequested())
             return false;
 
 
+        const int exp10 = Perturbator::logZoomToExp10(logZoom);
         if (frt.reference.reuse) {
             if (!renderData || !renderData->getReference() || !renderData->getPerturbator()) {
                 vkh::logger::log_err("Do not reuse Reference during reference calculation!!!");
@@ -908,19 +942,25 @@ namespace merutilm::rff2 {
                 requests.requestRecompute();
                 return false;
             }
-            renderData->translate(frt.general.logZoom, renderData->getPerturbator()->dcMax, frt.perturb,
+
+            fixed_point_complex_i1 center = frt.reference.center.create_variant(exp10);
+            const fixed_point_complex_i1 referenceCenter = renderData->getReference()->center.create_variant(exp10);
+            fixed_point_complex::sub(center, center, referenceCenter);
+            const dex distance = static_cast<complex<dex>>(center).norm_approx();
+
+
+            renderData->translate(frt.general.logZoom, dcMax + distance, frt.perturb,
                                   frt.reference.center, actionPerSeriesApproxIteration);
         } else {
-            const int exp10 = Perturbator::logZoomToExp10(logZoom);
             renderData = nullptr;
             if (logZoom > Constants::Fractal::ZOOM_DEADLINE) {
                 renderData = std::make_unique<DeepMB2RenderData>(
                         state, frt, approxTableCache, dcMax, exp10, capacity, 0, actionPerRefCalcIteration,
-                        actionPerSeriesApproxIteration, actionPerCreatingTableIteration, false);
+                        actionPerSeriesApproxIteration, actionPerCreatingTableIteration);
             } else {
                 renderData = std::make_unique<LightMB2RenderData>(
                         state, frt, approxTableCache, dcMax, exp10, capacity, 0, actionPerRefCalcIteration,
-                        actionPerSeriesApproxIteration, actionPerCreatingTableIteration, false);
+                        actionPerSeriesApproxIteration, actionPerCreatingTableIteration);
             }
         }
 
@@ -941,7 +981,6 @@ namespace merutilm::rff2 {
                          std::format("Period : {:L} ({:L}, {:L})", reference->longestPeriod(), refLength, mpaLen));
         if (state.interruptRequested())
             return false;
-
 
         return true;
     }

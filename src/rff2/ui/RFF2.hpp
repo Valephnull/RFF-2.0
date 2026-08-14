@@ -14,6 +14,7 @@
 #include "AppRenderManagerRequests.hpp"
 #include "AppRenderer.hpp"
 #include "AutoExplorer.hpp"
+#include "CrashRecovery.hpp"
 #include "CursorManager.hpp"
 #include "VideoProgressInfo.hpp"
 #include "ZoomAnimationInfo.hpp"
@@ -52,7 +53,7 @@ namespace merutilm::rff2 {
         VideoProgressInfo videoProgressInfo = {};
         BackgroundThreads backgroundThreads = BackgroundThreads();
         AutoExplorer autoExplorer;
-        bool guidedZoom = true;
+        CrashRecovery crashRecovery;
         bool guidedZoomTargetCached = false;
         bool mouseInsideWindow = false;
         int16_t guidedZoomMouseX = 0;
@@ -83,7 +84,9 @@ namespace merutilm::rff2 {
 
         static Settings genDefaultSettings();
 
-        [[nodiscard]] complex<dex> offsetConversion(const Settings &s, int mx, int my) const;
+        [[nodiscard]] complex<dex> offsetConversion(const Settings &s, int px, int py) const;
+        std::array<int, 2> iterationBufferConversion(const Settings &s, const complex<dex> &offset) const;
+        void moveCursor(int px, int py) const;
 
         static dex getDivisor(const Settings &settings);
 
@@ -120,10 +123,12 @@ namespace merutilm::rff2 {
         [[nodiscard]] int16_t getMouseYOnIterationBuffer(int my) const;
 
         void recomputeThreaded();
+        void moveCursorToCenter() const;
 
         void beforeIterationFill() const;
 
         bool prepareRenderData(float startTime, const Settings &s);
+
         bool fillIteration(float startTime, const Settings &s);
 
         void afterComputeFinally(bool success);
@@ -182,16 +187,6 @@ namespace merutilm::rff2 {
         [[nodiscard]] const Matrix<double> *getIterationMatrix() const { return iterationMatrix.get(); }
 
         [[nodiscard]] AutoExplorer &getAutoExplorer() { return autoExplorer; }
-
-        [[nodiscard]] bool isGuidedZoomEnabled() const { return guidedZoom; }
-
-        void setGuidedZoomEnabled(const bool enabled) {
-            guidedZoom = enabled;
-            if (!enabled) {
-                guidedZoomTarget = {};
-                guidedZoomTargetCached = false;
-            }
-        }
 
         [[nodiscard]] bool isNavigationLocked() const { return navigationLocked.load(); }
 

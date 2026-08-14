@@ -12,20 +12,6 @@
 
 
 namespace merutilm::rff2 {
-    std::unique_ptr<fixed_point_complex_i1> MB2Locator::findCenter(const MB2RenderDataBase &data) {
-        const int exp10 = Perturbator::logZoomToExp10(data.fractalSettings.general.logZoom);
-        fixed_point_complex_i1 center = data.getReference()->center.create_variant(exp10);
-        const fixed_point_complex_i1 dc = findCenterOffset(data)->create_variant(exp10);
-
-        const double dr = dc.clone_real().double_value();
-        const double di = dc.clone_imag().double_value();
-        if (const dex dcMax = data.getPerturbator()->dcMax; dex(dr * dr + di * di) > dcMax * dcMax) {
-            return nullptr;
-        }
-        fixed_point_complex::add(center, center, dc);
-        return std::make_unique<fixed_point_complex_i1>(center);
-    }
-
 
     std::unique_ptr<fixed_point_complex_i1> MB2Locator::findCenterOffset(const MB2RenderDataBase &data) {
         const int exp10 = Perturbator::logZoomToExp10(data.fractalSettings.general.logZoom);
@@ -148,7 +134,7 @@ namespace merutilm::rff2 {
             fixed_point_complex::add(center, center, centerOffset);
 
             if (centerOffset.is_strict_zero()) {
-                vkh::logger::log_err("No center found", "Error");
+                vkh::logger::log_err("The center could not be found, or you are already in the center");
                 return nullptr;
             }
             doubledZoomCalc.reference.center = center;
@@ -160,20 +146,16 @@ namespace merutilm::rff2 {
                     Perturbator::logZoomToExp10(doubledLogZoom), refLen, longestPeriod,
                     [&actionWhileFindingMinibrotCenter, &centerFixCount](const uint64_t p) {
                         actionWhileFindingMinibrotCenter(p, centerFixCount);
-                    }, actionWhileSeriesApprox, actionWhileCreatingTable, true);
+                    }, actionWhileSeriesApprox, actionWhileCreatingTable);
 
             } else {
                 doubledZoomData = std::make_unique<DeepMB2RenderData>(
                     state, doubledZoomCalc, cache, doubledZoomDcMax, Perturbator::logZoomToExp10(doubledLogZoom), refLen, longestPeriod,
                     [&actionWhileFindingMinibrotCenter, &centerFixCount](const uint64_t p) {
                         actionWhileFindingMinibrotCenter(p, centerFixCount);
-                    }, actionWhileSeriesApprox, actionWhileCreatingTable, true);
+                    }, actionWhileSeriesApprox, actionWhileCreatingTable);
             }
-
-
         }
-
-
         return doubledZoomData;
     }
 
@@ -181,7 +163,7 @@ namespace merutilm::rff2 {
 
         const auto it = static_cast<uint64_t>(renderData.getPerturbator()->iterate( {
             renderData.getPerturbator()->dcMax,
-           renderData.getPerturbator()->dcMax / dex(Constants::Fractal::INTENTIONAL_ERROR_DCLMB)
+            renderData.getPerturbator()->dcMax / dex(2)
         }));
 
         return it == renderData.fractalSettings.perturb.maxIteration;

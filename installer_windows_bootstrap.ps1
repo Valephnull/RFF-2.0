@@ -2,7 +2,6 @@ $RepoUrl = "https://github.com/Valephnull/RFF-EXP.git"
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-
 $InstallRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($InstallRoot))
 {
@@ -133,7 +132,12 @@ else
 }
 
 $InstalledExecutable = Join-Path $InstallRoot "bin\RFF.exe"
-if ($InstalledSha -eq $NewestSha -and (Test-Path -LiteralPath $InstalledExecutable))
+$InstallComplete = Test-Path -LiteralPath $InstalledExecutable
+foreach ($Name in $TargetDirs)
+{
+    $InstallComplete = $InstallComplete -and (Test-Path -LiteralPath (Join-Path $InstallRoot $Name))
+}
+if ($InstalledSha -eq $NewestSha -and $InstallComplete)
 {
     Write-Host "RFF-EXP is already up to date ($($NewestSha.Substring(0, 7)))." -ForegroundColor Green
     Read-Host "Press Enter to exit"
@@ -245,5 +249,5 @@ Write-Host "Version:  $($NewestSha.Substring(0, 7))" -ForegroundColor Green
 $Launch = Read-Host "Launch RFF-EXP now? [y/N]"
 if ($Launch -match "^[Yy]")
 {
-    Start-Process -FilePath $InstalledExecutable -WorkingDirectory $InstallRoot
+    Start-Process -FilePath $InstalledExecutable -WorkingDirectory (Join-Path $InstallRoot "bin")
 }

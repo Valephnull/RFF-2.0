@@ -5,8 +5,6 @@
 
 namespace merutilm::rff2 {
     namespace {
-        constexpr uint64_t MAX_FEATURE_ITERATIONS = 16'384;
-        constexpr int MAX_NEWTON_ITERATIONS = 12;
         constexpr double NEAR_LINEAR_RADIUS_SCALE_SQUARED = 0.0625;
         constexpr double MISIUREWICZ_CAPTURE_SCALE_SQUARED = 0.25;
         constexpr double MIN_DISTINCT_MAGNITUDE_SCALE = 0x1.0p-24;
@@ -161,8 +159,9 @@ namespace merutilm::rff2 {
             if (!reference || reference->longestPeriod() == 0 || !(searchRadius > dex::ZERO))
                 return std::nullopt;
 
-            const uint64_t maximumIterations =
-                    std::clamp<uint64_t>(data.fractalSettings.perturb.maxIteration, 32, MAX_FEATURE_ITERATIONS);
+            const uint64_t maximumIterations = data.fractalSettings.perturb.maxIteration;
+            if (maximumIterations == 0)
+                return std::nullopt;
             const dex radiusSquared = searchRadius * searchRadius;
             const std::optional<Detection> detection =
                     detectPeriod(*reference, cursorOffsetFromReference, radiusSquared, maximumIterations);
@@ -171,7 +170,8 @@ namespace merutilm::rff2 {
 
             complex<dex> refined = cursorOffsetFromReference;
             bool converged = false;
-            for (int iteration = 0; iteration < MAX_NEWTON_ITERATIONS; ++iteration) {
+            std::vector<complex<dex>> refinementHistory;
+            while (true) {
                 const FixedEvaluation evaluation =
                         evaluateFixed(*reference, refined, detection->preperiod, detection->endIteration);
                 if (!evaluation.completed || evaluation.derivativeDifference.norm_sqr().is_zero())
@@ -182,13 +182,23 @@ namespace merutilm::rff2 {
                     converged = true;
                     break;
                 }
-                refined = normalized(refined - correction);
+                const complex<dex> nextRefined = normalized(refined - correction);
                 const dex correctionMagnitude = correction.norm_sqr();
-                if (correctionMagnitude < refined.norm_sqr() * dex(NEWTON_RELATIVE_TOLERANCE_SQUARED) ||
+                if (correctionMagnitude < nextRefined.norm_sqr() * dex(NEWTON_RELATIVE_TOLERANCE_SQUARED) ||
                     correctionMagnitude < radiusSquared * dex(NEWTON_RADIUS_TOLERANCE_SQUARED)) {
+                    refined = nextRefined;
                     converged = true;
                     break;
                 }
+
+                // There is no fixed pass limit. Reject divergent motion or an exact
+                // finite-precision cycle so a pathological candidate cannot trap the UI.
+                if ((nextRefined - cursorOffsetFromReference).norm_sqr() > radiusSquared ||
+                    std::ranges::find(refinementHistory, nextRefined) != refinementHistory.end()) {
+                    return std::nullopt;
+                }
+                refinementHistory.push_back(refined);
+                refined = nextRefined;
             }
 
             if (!converged || (refined - cursorOffsetFromReference).norm_sqr() > radiusSquared)
