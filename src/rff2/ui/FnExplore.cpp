@@ -58,88 +58,24 @@ namespace merutilm::rff2 {
         }
     }
     void FnExplore::moveCursorToCenter(RFF2 &app) {
-        if (ImGui::Checkbox("Guided Zoom", &app.getSettings().explore.autoMoveCursorToCenter)) {
-            if (app.getSettings().explore.autoMoveCursorToCenter) app.moveCursorToCenter();
+        ExploreSettings &explore = app.getSettings().explore;
+        if (ImGui::Checkbox("Guided Zoom", &explore.autoMoveCursorToCenter)) {
+            if (explore.autoMoveCursorToCenter)
+                app.moveCursorToCenter();
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Aim inward zooms at Merutilm's detected center; nearby feature search is used as a fallback");
+        if (explore.autoMoveCursorToCenter) {
+            ImGui::InputInt("Aim Radius (px)", &explore.autoAimRadiusPixels, 8, 32);
+            explore.autoAimRadiusPixels = std::max(1, explore.autoAimRadiusPixels);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Only redirect when the selected feature is within this many screen pixels of the cursor");
+        }
     }
 
     void FnExplore::reuseReference(RFF2 &app) {
         auto& frt = app.getSettings().fractal;
         ImGui::Checkbox("Reuse Reference", &frt.reference.reuse);
-    }
-
-    void FnExplore::moveToCenter(RFF2 &app) {
-        const MB2RenderDataBase * renderData = app.getCurrentRenderData();
-        auto& frt = app.getSettings().fractal;
-        if (renderData && renderData->getPerturbator()) {
-            if (ImGui::Button("Move To Center", ImVec2(-FLT_MIN, 0))) {
-                const int exp10 = Perturbator::logZoomToExp10(renderData->getReference()->logZoom);
-                const auto off = MB2Locator::findCenterOffset(*renderData)->create_variant(exp10);
-                fixed_point_complex_i1 center = frt.reference.center.create_variant(exp10);
-                fixed_point_complex::add(center, center, off);
-                frt.reference.center = center;
-                app.getRequests().requestRecompute();
-            }
-        }
-    }
-
-
-    void FnExplore::goToOriginalReference(RFF2 &app) {
-
-        MB2RenderDataBase * renderData = app.getCurrentRenderData();
-
-        auto& frt = app.getSettings().fractal;
-        if (frt.reference.reuse && renderData && renderData->getReference()) {
-            if (ImGui::Button("Go to Original Reference", ImVec2(-FLT_MIN, 0))) {
-                const float startTime = app.rootWindowContext->getWindow()->getTime();
-                frt.reference.center = renderData->getReference()->center;
-                frt.general.logZoom = renderData->getReference()->logZoom;
-                renderData->translate(frt.general.logZoom, renderData->getReference()->dcMax, app.getSettings().fractal.perturb, frt.reference.center, getActionWhileSeriesApprox(app, startTime));
-                app.getRequests().requestRecompute();
-            }
-        }
-    }
-
-    void FnExplore::locateCenteredReference(RFF2 &app) {
-
-        std::unique_ptr<MB2RenderDataBase> &data = app.getCurrentRenderDataOwnRef();
-                    Settings &settings = app.getSettings();
-        if (data && data->getReference() && data->getPerturbator() && !settings.fractal.reference.reuse) {
-            if (ImGui::Button("Locate Centered Reference", ImVec2(-FLT_MIN, 0))) {
-
-                ParallelRenderState &state = app.getState();
-
-                state.createThread([&] {
-                    const float startTime = app.rootWindowContext->getWindow()->getTime();
-                    const uint64_t period = data->getReference()->longestPeriod();
-                    const auto center = MB2Locator::locateMinibrot(
-                            state, *data, *app.getApproxTableCache(), getActionWhileFindingMBCenter(app, period, startTime),
-                            getActionWhileSeriesApprox(app, startTime), getActionWhileCreatingTable(app, startTime),
-                            getActionWhileFindingZoom(app, startTime));
-                    if (center == nullptr)
-                        return;
-
-                    FractalSettings refCalc = settings.fractal;
-                    refCalc.reference.center = center->data->fractalSettings.reference.center;
-                    refCalc.general.logZoom = center->data->fractalSettings.general.logZoom - MB2Locator::MINIBROT_LOG_ZOOM_OFFSET;
-                    int refExp10 = Perturbator::logZoomToExp10(refCalc.general.logZoom);
-                    if (refCalc.general.logZoom > Constants::Fractal::ZOOM_DEADLINE) {
-                        data = std::make_unique<DeepMB2RenderData>(
-                                state, refCalc, *app.getApproxTableCache(), center->data->getPerturbator()->dcMax, refExp10,
-                                data->getReference()->length(), 0, getActionWhileRefCalc(app, startTime), getActionWhileSeriesApprox(app, startTime), getActionWhileCreatingTable(app, startTime));
-                    } else {
-                        data = std::make_unique<LightMB2RenderData>(
-                                state, refCalc, *app.getApproxTableCache(), center->data->getPerturbator()->dcMax, refExp10,
-                                data->getReference()->length(), 0, getActionWhileRefCalc(app, startTime), getActionWhileSeriesApprox(app, startTime), getActionWhileCreatingTable(app, startTime));
-                    }
-
-                    settings.fractal.reference.reuse = true;
-                    app.getRequests().requestRecompute();
-                });
-            }
-        }
     }
 
     void FnExplore::locateMinibrot(RFF2 &app) {

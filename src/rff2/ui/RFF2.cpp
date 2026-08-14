@@ -158,7 +158,7 @@ namespace merutilm::rff2 {
                 .video = {.data = {.defaultZoomIncrement = 2, .isStatic = false},
                           .animation = {.overZoom = 2, .showText = true, .mps = 1},
                           .exportation = {.fps = 60, .bitrate = 9000}},
-                .explore = {.autoMoveCursorToCenter = true}};
+                .explore = {.autoMoveCursorToCenter = true, .autoAimRadiusPixels = 64}};
 #else
         return Settings{
                 .fractal =
@@ -195,7 +195,7 @@ namespace merutilm::rff2 {
                 .video = {.data = {.defaultZoomIncrement = 2, .isStatic = false},
                           .animation = {.overZoom = 2, .showText = true, .mps = 1},
                           .exportation = {.fps = 60, .bitrate = 9000}},
-                .explore = {.autoMoveCursorToCenter = true}};
+                .explore = {.autoMoveCursorToCenter = true, .autoAimRadiusPixels = 64}};
 #endif
     }
 
@@ -258,20 +258,24 @@ namespace merutilm::rff2 {
         };
         const complex<dex> cursorOffsetFromReference = cursorOffsetFromCurrent + perturbator->off;
 
-        // Imagina searches at two cursor-centred radii: 1/24 and 1/12 in its
-        // normalized coordinates, equivalent to 1/48 and 1/24 of the view height.
-        const int maximumRadius = std::max(4, std::min(width, height) / 24);
-        const int minimumRadius = std::max(2, maximumRadius / 2);
+        const double requestedRadius =
+                static_cast<double>(std::max(1, settings.explore.autoAimRadiusPixels)) * clarity;
+        const int maximumRadius = std::max(
+                1, static_cast<int>(std::lround(std::min(requestedRadius, std::hypot(width, height)))));
+        const int minimumRadius = std::max(1, maximumRadius / 2);
         const std::array radii = {minimumRadius, maximumRadius};
         GuidedZoomTarget selected = {};
         double selectedDistance = 0;
 
-        // Prefer Merutilm's auto-aim center whenever it is visible. The older
-        // Imagina-inspired nearby-feature search remains as an off-screen fallback.
+        // Prefer Merutilm's auto-aim center when it is within the configured cursor
+        // radius. The Imagina-inspired nearby-feature search remains as a fallback.
         if (const std::unique_ptr<fixed_point_complex_i1> centerOffset = MB2Locator::findCenterOffset(*data)) {
             complex<dex> offsetFromCurrent = static_cast<complex<dex>>(*centerOffset) - perturbator->off;
             const std::array centerPixel = iterationBufferConversion(settings, offsetFromCurrent);
-            if (centerPixel[0] >= 0 && centerPixel[1] >= 0 && centerPixel[0] < width && centerPixel[1] < height) {
+            const double centerDistance = std::hypot(static_cast<double>(centerPixel[0] - cursorX),
+                                                     static_cast<double>(centerPixel[1] - cursorY));
+            if (centerPixel[0] >= 0 && centerPixel[1] >= 0 && centerPixel[0] < width && centerPixel[1] < height &&
+                centerDistance <= maximumRadius) {
                 return {
                         static_cast<float>(centerPixel[0]),
                         static_cast<float>(centerPixel[1]),
@@ -328,20 +332,23 @@ namespace merutilm::rff2 {
         constexpr double MINIMUM_SEARCH_INTERVAL = 0.075;
         const int quantizedX = mouseX / CURSOR_QUANTIZATION * CURSOR_QUANTIZATION;
         const int quantizedY = mouseY / CURSOR_QUANTIZATION * CURSOR_QUANTIZATION;
+        const int radiusPixels = settings.explore.autoAimRadiusPixels;
         const uint64_t render = completedRenderCount.load();
         if (guidedZoomTargetCached && guidedZoomMouseX == quantizedX && guidedZoomMouseY == quantizedY &&
-            guidedZoomTargetRender == render) {
+            guidedZoomTargetRender == render && guidedZoomTargetRadiusPixels == radiusPixels) {
             return;
         }
 
         const double now = rootWindowContext->getWindow()->getTime();
         if (guidedZoomTargetCached && guidedZoomTargetRender == render &&
+            guidedZoomTargetRadiusPixels == radiusPixels &&
             now - guidedZoomLastSearchTime < MINIMUM_SEARCH_INTERVAL) {
             return;
         }
 
         guidedZoomMouseX = static_cast<int16_t>(quantizedX);
         guidedZoomMouseY = static_cast<int16_t>(quantizedY);
+        guidedZoomTargetRadiusPixels = radiusPixels;
         guidedZoomTargetRender = render;
         guidedZoomLastSearchTime = now;
         guidedZoomTarget = findGuidedZoomTarget(quantizedX, quantizedY);
@@ -744,9 +751,6 @@ namespace merutilm::rff2 {
                 FnExplore::cancelRender(*this);
                 FnExplore::moveCursorToCenter(*this);
                 FnExplore::reuseReference(*this);
-                FnExplore::moveToCenter(*this);
-                FnExplore::goToOriginalReference(*this);
-                FnExplore::locateCenteredReference(*this);
                 ImGui::EndDisabled();
                 FnExplore::locateMinibrot(*this);
                 ImGui::BeginDisabled(controlsLocked);
@@ -889,8 +893,16 @@ namespace merutilm::rff2 {
 
         // multiplying 1.01 to attract reference center to client center
         const std::array<int, 2> ib = iterationBufferConversion(settings, offDex * dex(1.01));
+        double mouseWindowX = 0;
+        double mouseWindowY = 0;
+        glfwGetCursorPos(rootWindowContext->getWindow()->getWindow(), &mouseWindowX, &mouseWindowY);
+        const int mouseX = getMouseXOnIterationBuffer(static_cast<int>(mouseWindowX));
+        const int mouseY = getMouseYOnIterationBuffer(static_cast<int>(mouseWindowY));
+        const double radius = static_cast<double>(settings.explore.autoAimRadiusPixels) *
+                              std::max(settings.render.clarityMultiplier, 0.001f);
+        const double distance = std::hypot(static_cast<double>(ib[0] - mouseX), static_cast<double>(ib[1] - mouseY));
 
-        if (ib[0] >= 0 && ib[1] >= 0 && ib[0] < width && ib[1] < height) {
+        if (ib[0] >= 0 && ib[1] >= 0 && ib[0] < width && ib[1] < height && distance <= radius) {
             moveCursor(ib[0], ib[1]);
         }
     }

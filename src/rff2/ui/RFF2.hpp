@@ -58,6 +58,7 @@ namespace merutilm::rff2 {
         bool mouseInsideWindow = false;
         int16_t guidedZoomMouseX = 0;
         int16_t guidedZoomMouseY = 0;
+        int guidedZoomTargetRadiusPixels = 0;
         uint64_t guidedZoomTargetRender = 0;
         double guidedZoomLastSearchTime = -1;
         GuidedZoomTarget guidedZoomTarget = {};
