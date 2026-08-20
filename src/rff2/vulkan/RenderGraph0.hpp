@@ -4,7 +4,6 @@
 
 #pragma once
 #include "GPCColor.hpp"
-#include "GPCDownsampleForBlur.hpp"
 #include "GPCIterationPalette.hpp"
 #include "GPCSlope.hpp"
 #include "GPCStripe.hpp"

@@ -1,0 +1,34 @@
+//
+// Created by Merutilm on 2025-08-31.
+//
+
+#pragma once
+#include "../settings/ShdNoiseReduction.hpp"
+#include "vulkan_helper/engine/configurator/GeneralPostProcessGraphicsPipelineConfigurator.hpp"
+
+namespace merutilm::rff2 {
+    struct GPCNoiseReduction final : public vkh::GeneralPostProcessGraphicsPipelineConfigurator {
+        static constexpr uint32_t SET_PREV_RESULT = 0;
+        static constexpr uint32_t BINDING_PREV_RESULT_SAMPLER = 0;
+
+        static constexpr uint32_t SET_NOISE_REDUCTION = 1;
+
+        explicit GPCNoiseReduction(vkh::Engine &engine, vkh::WindowContext &wc) :
+            GeneralPostProcessGraphicsPipelineConfigurator(engine, wc,
+                                                           "vk_noise_reduction.frag") {}
+
+
+        void updateQueue(vkh::DescriptorUpdateQueue &queue, uint32_t frameIndex) override;
+
+        void setNoiseReduction(const ShdNoiseReduction &noiseReduction) const;
+
+        void pipelineInitialized() override;
+
+        void renderContextRefreshed() override;
+
+    protected:
+        void configurePushConstant(vkh::PipelineLayoutManager &pipelineLayoutManager) override;
+
+        void configureDescriptors(std::vector<vkh::Descriptor *> &descriptors) override;
+    };
+} // namespace merutilm::rff2

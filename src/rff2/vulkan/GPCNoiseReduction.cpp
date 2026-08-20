@@ -1,0 +1,86 @@
+//
+// Created by Merutilm on 2025-08-31.
+//
+
+#include "GPCNoiseReduction.hpp"
+
+#include "SharedDescriptorTemplate.hpp"
+#include "SharedImageContextIndices.hpp"
+#include "vulkan_helper/engine/repo/GlobalSamplerRepo.hpp"
+
+namespace merutilm::rff2 {
+    void GPCNoiseReduction::updateQueue(vkh::DescriptorUpdateQueue &queue, uint32_t frameIndex) {
+        //noop
+    }
+
+    void GPCNoiseReduction::setNoiseReduction(const ShdNoiseReduction &noiseReduction) const {
+        using namespace SharedDescriptorTemplate;
+        auto &interDesc = getDescriptor(SET_NOISE_REDUCTION);
+        auto &interUBO = interDesc.get<vkh::Uniform>(
+            0, DescNoiseReduction::BINDING_UBO_NOISE_REDUCTION);
+        auto &interUBOHost = interUBO.getHostObject();
+        interUBOHost.set<bool>(DescNoiseReduction::TARGET_NOISE_REDUCTION_USE, noiseReduction.use);
+        interUBOHost.set<uint32_t>(DescNoiseReduction::TARGET_NOISE_REDUCTION_SIMILAR_COUNT_THRESHOLD, noiseReduction.similarCountThreshold);
+        interUBOHost.set<float>(DescNoiseReduction::TARGET_NOISE_REDUCTION_DIFFERENCE_THRESHOLD, noiseReduction.differenceThreshold);
+        interUBO.update();
+    }
+
+    void GPCNoiseReduction::pipelineInitialized() {
+        using namespace SharedDescriptorTemplate;
+        writeDescriptorMF([this](vkh::DescriptorUpdateQueue &queue, const uint32_t frameIndex) {
+            getDescriptor(SET_NOISE_REDUCTION).queue(queue, frameIndex, {}, {DescBloom::BINDING_UBO_BLOOM});
+        });
+    }
+
+    void GPCNoiseReduction::renderContextRefreshed() {
+        auto &sic = wc.getSharedImageContext();
+        auto &samplerDesc = getDescriptor(SET_PREV_RESULT);
+        const auto &sample = sic.getImageContextMF(SharedImageContextIndices::MF_MAIN_RENDER_IMAGE_PRIMARY);
+        samplerDesc.get<vkh::CombinedImageSampler>(0, BINDING_PREV_RESULT_SAMPLER).
+                setImageContextMF(sample);
+
+
+
+        writeDescriptorMF([&samplerDesc](vkh::DescriptorUpdateQueue &queue, const uint32_t frameIndex) {
+            samplerDesc.queue(queue, frameIndex, {}, {BINDING_PREV_RESULT_SAMPLER});
+        });
+    }
+
+    void GPCNoiseReduction::configurePushConstant(
+        vkh::PipelineLayoutManager &pipelineLayoutManager) {
+        //noop
+    }
+
+    void GPCNoiseReduction::configureDescriptors(std::vector<vkh::Descriptor *> &descriptors) {
+        using namespace SharedDescriptorTemplate;
+        vkh::Sampler &sampler = pickFromGlobalRepository<vkh::GlobalSamplerRepo, vkh::Sampler &>(
+            VkSamplerCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .magFilter = VK_FILTER_NEAREST,
+                .minFilter = VK_FILTER_NEAREST,
+                .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                .mipLodBias = 0,
+                .anisotropyEnable = VK_FALSE,
+                .maxAnisotropy = 0,
+                .compareEnable = VK_FALSE,
+                .compareOp = VK_COMPARE_OP_ALWAYS,
+                .minLod = 0,
+                .maxLod = 0,
+                .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+                .unnormalizedCoordinates = VK_FALSE,
+            });
+        auto descManager = vkh::DescriptorManager();
+
+        descManager.appendCombinedImgSampler(BINDING_PREV_RESULT_SAMPLER,
+                                                        VK_SHADER_STAGE_FRAGMENT_BIT,
+                                                        std::make_unique<vkh::CombinedImageSampler>(
+                                                            wc.core, sampler, true));
+        appendUniqueDescriptor(SET_PREV_RESULT, descriptors, std::move(descManager));
+        appendDescriptor<DescNoiseReduction>(SET_NOISE_REDUCTION, descriptors);
+    }
+}
