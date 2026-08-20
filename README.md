@@ -10,7 +10,8 @@ Currently, I have added:
 
 * Newton-Raphson Zooming menu - basically Kalles Fraktaler's Newton-Raphson menu
 * Auto Exploration menu - basically Fractal eXtreme's menu but better, and with more features
-* Autosave - If a crash happens, you can get back to that location next time you launch RFF-EXP. This is by far, my favorite feature
+* Autosave - If a crash happens, you can get back to that location next time you launch RFF-EXP
+* Render Pool - Render RFF keyframe sequences on multiple computers
 
 ## Installation
 
