@@ -32,6 +32,10 @@ add_executable(
         src/rff2/ui/FnExplore.cpp
         src/rff2/ui/AutoExplorer.cpp
         src/rff2/ui/CrashRecovery.cpp
+        src/rff2/renderpool/RenderPool.cpp
+        src/rff2/renderpool/RenderPoolJob.cpp
+        src/rff2/renderpool/RenderPoolNetwork.cpp
+        src/rff2/renderpool/RenderPoolUpnp.cpp
         src/rff2/preset/shader/palette/ShdPalettePresets.cpp
         src/rff2/preset/shader/fog/ShdFogPresets.cpp
         src/rff2/preset/shader/color/ShdColorPresets.cpp
@@ -89,10 +93,13 @@ target_compile_options(RFF PRIVATE
 
 add_subdirectory(src/vulkan_helper)
 
+find_package(OpenSSL REQUIRED)
 
 target_link_libraries(RFF PRIVATE
         # Vulkan Helper
         vulkan_helper
+        # Render-pool password proofs
+        OpenSSL::Crypto
 )
 
 target_include_directories(RFF PRIVATE
@@ -115,6 +122,8 @@ if (WIN32)
             ${CLANG64_LIBS}/libopencv_imgproc.dll.a
             ${CLANG64_LIBS}/libopencv_videoio.dll.a
             ${CLANG64_LIBS}/libopencv_highgui.dll.a
+            # Render-pool networking
+            ws2_32
     )
 
 
@@ -179,6 +188,20 @@ endmacro()
 
 include(FetchContent)
 
+set(UPNPC_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(UPNPC_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
+set(UPNPC_NO_INSTALL ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+        miniupnpc
+        GIT_REPOSITORY https://github.com/miniupnp/miniupnp.git
+        GIT_TAG miniupnpc_2_3_3
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR miniupnpc
+)
+FetchContent_MakeAvailable(miniupnpc)
+
 FetchContent_Declare(
         nfd
         GIT_REPOSITORY https://github.com/btzy/nativefiledialog-extended.git
@@ -187,6 +210,24 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(nfd)
 
-target_link_libraries(RFF PRIVATE nfd)
+target_link_libraries(RFF PRIVATE nfd libminiupnpc-static)
 
 RFF_DEFINITION(SAFE_DEX_OPERATOR "Better Quality, Slower Speed for Deep Zoom" OFF)
+
+option(RFF_BUILD_TESTS "Build RFF-EXP render-pool tests" OFF)
+if (RFF_BUILD_TESTS)
+    enable_testing()
+    add_executable(RFFRenderPoolNetworkTest
+            tests/RenderPoolNetworkTest.cpp
+            src/rff2/renderpool/RenderPoolNetwork.cpp)
+    target_include_directories(RFFRenderPoolNetworkTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(RFFRenderPoolNetworkTest PRIVATE OpenSSL::Crypto)
+    if (WIN32)
+        target_link_libraries(RFFRenderPoolNetworkTest PRIVATE ws2_32)
+    endif ()
+    add_test(NAME render_pool_network COMMAND RFFRenderPoolNetworkTest)
+    if (WIN32)
+        set_tests_properties(render_pool_network PROPERTIES
+                ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CLANG64_DIRS}/bin")
+    endif ()
+endif ()

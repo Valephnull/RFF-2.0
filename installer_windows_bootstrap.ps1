@@ -96,7 +96,9 @@ $Packages = @(
     "mingw-w64-clang-x86_64-vulkan",
     "mingw-w64-clang-x86_64-glm",
     "mingw-w64-clang-x86_64-glfw",
-    "mingw-w64-clang-x86_64-opencv"
+    "mingw-w64-clang-x86_64-opencv",
+    "mingw-w64-clang-x86_64-openssl",
+    "mingw-w64-clang-x86_64-shaderc"
 ) -join " "
 
 & $Msys2Bash -lc "pacman -S --noconfirm --needed $Packages"
@@ -179,6 +181,11 @@ Assert-NativeSuccess "Configuring RFF-EXP"
 $ParallelJobs = if ($env:NUMBER_OF_PROCESSORS) { [int]$env:NUMBER_OF_PROCESSORS } else { 1 }
 cmake --build $BuildDir --parallel $ParallelJobs
 Assert-NativeSuccess "Building RFF-EXP"
+
+$SourceDirUnix = (& $Msys2Bash -lc 'cygpath -u "$1"' -- $SourceDir | Select-Object -Last 1).Trim()
+Assert-NativeSuccess "Converting the source path for shader compilation"
+& $Msys2Bash -lc 'export PATH="/clang64/bin:$PATH"; cd "$1" && ./compile.sh' -- $SourceDirUnix
+Assert-NativeSuccess "Compiling RFF-EXP shaders"
 
 Write-Step "Installing RFF-EXP"
 

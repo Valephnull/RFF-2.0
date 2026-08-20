@@ -4,12 +4,19 @@
 
 #pragma once
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
+#include <stop_token>
+#include <thread>
 
 #include "../io/RFFDynamicMapBinary.h"
 #include "../mb/MB2Perturbator.h"
 #include "../mb/MB2RenderData.hpp"
 #include "../parallel/BackgroundThreads.h"
 #include "../preset/Presets.h"
+#include "../renderpool/RenderPool.hpp"
 #include "../settings/Settings.h"
 #include "AppRenderManagerRequests.hpp"
 #include "AppRenderer.hpp"
@@ -32,12 +39,32 @@ namespace merutilm::rff2 {
             bool found = false;
         };
 
+        struct GuidedZoomSearchRequest {
+            int mouseX = 0;
+            int mouseY = 0;
+            int width = 0;
+            int height = 0;
+            int radiusPixels = 0;
+            float clarity = 1;
+            dex divisor = dex::ONE;
+            uint64_t render = 0;
+            uint64_t serial = 0;
+            std::stop_token cancellation;
+        };
+
+        struct GuidedZoomSearchResult {
+            GuidedZoomTarget target;
+            uint64_t render = 0;
+            uint64_t serial = 0;
+        };
+
         ParallelRenderState state = {};
         Settings settings;
         AppRenderManagerRequests requests = {};
         AppRenderer *renderer = nullptr;
 
         std::atomic<bool> idleCompute = true;
+        std::atomic<bool> lastRenderSucceeded = false;
         std::atomic<uint64_t> completedRenderCount = 0;
         std::atomic<bool> canShowPreview = false;
         std::atomic<bool> navigationLocked = false;
@@ -45,6 +72,7 @@ namespace merutilm::rff2 {
 
         std::array<std::string, Constants::Status::LENGTH> statusMessages = {};
         std::unique_ptr<Matrix<double>> iterationMatrix = nullptr;
+        mutable std::shared_mutex renderDataMutex;
         std::unique_ptr<MB2RenderDataBase> renderData = nullptr;
         std::unique_ptr<ApproxTableCacheBase> approxTableCache = nullptr;
         std::unique_ptr<CursorManager> cursorManager = nullptr;
@@ -54,6 +82,7 @@ namespace merutilm::rff2 {
         BackgroundThreads backgroundThreads = BackgroundThreads();
         AutoExplorer autoExplorer;
         CrashRecovery crashRecovery;
+        RenderPool renderPool;
         bool guidedZoomTargetCached = false;
         bool mouseInsideWindow = false;
         int16_t guidedZoomMouseX = 0;
@@ -62,15 +91,21 @@ namespace merutilm::rff2 {
         uint64_t guidedZoomTargetRender = 0;
         double guidedZoomLastSearchTime = -1;
         GuidedZoomTarget guidedZoomTarget = {};
+        bool guidedZoomSearchQueued = false;
+        std::mutex guidedZoomSearchMutex;
+        std::condition_variable guidedZoomSearchCondition;
+        std::stop_source guidedZoomActiveSearchStop;
+        std::optional<GuidedZoomSearchRequest> guidedZoomPendingSearch;
+        std::optional<GuidedZoomSearchResult> guidedZoomCompletedSearch;
+        uint64_t guidedZoomSearchSerial = 0;
+        std::jthread guidedZoomSearchThread;
         bool wheelZoomRenderPending = false;
         double wheelZoomLastInputTime = -1;
 
     public:
-        explicit RFF2(const vkh::WindowInitializerSettings &wic) : Application(wic), settings(genDefaultSettings()) {
+        explicit RFF2(const vkh::WindowInitializerSettings &wic) : Application(wic), settings(genDefaultSettings()) {}
 
-        }
-
-        ~RFF2() override = default;
+        ~RFF2() override { stopGuidedZoomSearchWorker(); }
 
         RFF2(const RFF2 &) = delete;
 
@@ -149,48 +184,36 @@ namespace merutilm::rff2 {
         }
 
 
-        [[nodiscard]] Settings &getSettings() {
-            return settings;
-        }
+        [[nodiscard]] Settings &getSettings() { return settings; }
 
         [[nodiscard]] const Settings &getSettings() const { return settings; }
 
-        [[nodiscard]] ParallelRenderState &getState() {
-            return state;
-        }
+        [[nodiscard]] ParallelRenderState &getState() { return state; }
 
-        [[nodiscard]] MB2RenderDataBase *getCurrentRenderData() const {
-            return renderData.get();
-        }
+        [[nodiscard]] MB2RenderDataBase *getCurrentRenderData() const { return renderData.get(); }
 
-        [[nodiscard]] std::unique_ptr<MB2RenderDataBase> &getCurrentRenderDataOwnRef() {
-            return renderData;
-        }
+        [[nodiscard]] std::unique_ptr<MB2RenderDataBase> &getCurrentRenderDataOwnRef() { return renderData; }
 
-        [[nodiscard]] std::unique_ptr<ApproxTableCacheBase> *getApproxTableCache(){
-            return &approxTableCache;
-        }
+        [[nodiscard]] std::unique_ptr<ApproxTableCacheBase> *getApproxTableCache() { return &approxTableCache; }
 
-        [[nodiscard]] AppRenderManagerRequests &getRequests() {
-            return requests;
-        }
+        [[nodiscard]] AppRenderManagerRequests &getRequests() { return requests; }
 
 
         void setCurrentPerturbator(std::unique_ptr<MB2RenderDataBase> data) {
+            std::unique_lock lock(renderDataMutex);
             renderData = std::move(data);
         }
 
-        [[nodiscard]] BackgroundThreads &getBackgroundThreads() {
-            return backgroundThreads;
-        }
+        [[nodiscard]] BackgroundThreads &getBackgroundThreads() { return backgroundThreads; }
 
         [[nodiscard]] RFFDynamicMapBinary generateMap() const {
-            return {renderData->fractalSettings.general.logZoom, renderData->getReference()->longestPeriod(), renderData->fractalSettings.perturb.maxIteration, *iterationMatrix};
+            return {renderData->fractalSettings.general.logZoom, renderData->getReference()->longestPeriod(),
+                    renderData->fractalSettings.perturb.maxIteration, *iterationMatrix};
         }
 
-        [[nodiscard]] bool isIdleCompute() const {
-            return idleCompute;
-        }
+        [[nodiscard]] bool isIdleCompute() const { return idleCompute; }
+
+        [[nodiscard]] bool getLastRenderSucceeded() const { return lastRenderSucceeded.load(); }
 
         [[nodiscard]] uint64_t getCompletedRenderCount() const { return completedRenderCount; }
 
@@ -198,9 +221,22 @@ namespace merutilm::rff2 {
 
         [[nodiscard]] AutoExplorer &getAutoExplorer() { return autoExplorer; }
 
+        [[nodiscard]] RenderPool &getRenderPool() { return renderPool; }
+
         [[nodiscard]] bool isNavigationLocked() const { return navigationLocked.load(); }
 
         void beginNewtonNavigationLock() {
+            cancelGuidedZoomSearch();
+            navigationLocked = true;
+            unlockNavigationAfterRender = false;
+            wheelZoomRenderPending = false;
+            requests.recomputeRequested = false;
+            guidedZoomTarget = {};
+            guidedZoomTargetCached = false;
+        }
+
+        void beginRenderPoolNavigationLock() {
+            cancelGuidedZoomSearch();
             navigationLocked = true;
             unlockNavigationAfterRender = false;
             wheelZoomRenderPending = false;
@@ -217,12 +253,11 @@ namespace merutilm::rff2 {
         void unlockNavigationWhenRenderFinishes() { unlockNavigationAfterRender = true; }
 
 
-        [[nodiscard]] vkh::WindowContext &getWindowContext() const {
-            return *rootWindowContext;
-        }
+        [[nodiscard]] vkh::WindowContext &getWindowContext() const { return *rootWindowContext; }
 
 
-        template<typename P> requires std::is_base_of_v<Preset, P>
+        template<typename P>
+            requires std::is_base_of_v<Preset, P>
         void applyPreset(P &preset);
 
         void onStart() override;
@@ -234,13 +269,17 @@ namespace merutilm::rff2 {
         VideoProgressInfo &getVideoProgressInfo() { return videoProgressInfo; }
 
     protected:
-
-
         void renderImGui() override;
 
 
     private:
-        [[nodiscard]] GuidedZoomTarget findGuidedZoomTarget(int mouseX, int mouseY) const;
+        [[nodiscard]] GuidedZoomTarget findGuidedZoomTarget(const GuidedZoomSearchRequest &request) const;
+        void startGuidedZoomSearchWorker();
+        void stopGuidedZoomSearchWorker();
+        void guidedZoomSearchLoop(std::stop_token stopToken);
+        void cancelGuidedZoomSearch(bool clearTarget = true);
+        void collectGuidedZoomSearchResult();
+        void queueGuidedZoomSearch(int mouseX, int mouseY, int radiusPixels, uint64_t render);
         void refreshGuidedZoomTarget(int mouseX, int mouseY);
         void renderGuidedZoomOverlay();
         static void initImGui();
@@ -249,7 +288,8 @@ namespace merutilm::rff2 {
     };
 
 
-    template<typename P> requires std::is_base_of_v<Preset, P>
+    template<typename P>
+        requires std::is_base_of_v<Preset, P>
     void RFF2::applyPreset(P &preset) {
         if constexpr (std::is_base_of_v<Presets::CalculationPreset, P>) {
             settings.fractal.reference.sync = preset.genRefSync();
@@ -288,4 +328,4 @@ namespace merutilm::rff2 {
             requests.requestShader();
         }
     }
-}
+} // namespace merutilm::rff2

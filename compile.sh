@@ -45,3 +45,5 @@ printf -- "-- Shader Compilation Done (%ss), " "$elapsed"
 printf "\033[36mSuccess %d\033[0m | " "$success"
 printf "\033[31mFail %d\033[0m | " "$fail"
 printf "Total %d\n" "$len"
+
+(( fail == 0 ))

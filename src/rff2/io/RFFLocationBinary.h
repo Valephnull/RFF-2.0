@@ -25,6 +25,8 @@ namespace merutilm::rff2 {
 
         void exportAsKeyframe(const std::filesystem::path &dir) const override;
 
+        void exportAsKeyframe(const std::filesystem::path &dir, uint32_t id) const;
+
         void exportFile(const std::filesystem::path &path) const override;
 
         [[nodiscard]] const std::string &getReal() const;

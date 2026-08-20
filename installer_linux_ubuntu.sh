@@ -66,7 +66,9 @@ fi
     libgmp-dev \
     libgtk-3-dev \
     libopencv-dev \
+    libssl-dev \
     libvulkan-dev \
+    glslc \
     ninja-build \
     pkg-config \
     python3-venv
@@ -145,6 +147,7 @@ step "Building RFF-EXP"
     -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_BUILD_TYPE=Release
 "$cmake_command" --build "$source_dir/build" --parallel "$(nproc)"
+"$source_dir/compile.sh"
 
 step "Installing RFF-EXP"
 

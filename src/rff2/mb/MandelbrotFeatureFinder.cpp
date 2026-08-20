@@ -80,7 +80,8 @@ namespace merutilm::rff2 {
 
         template<Number Num>
         [[nodiscard]] std::optional<Detection> detectPeriod(const MB2Reference<Num> &reference, const complex<dex> dc,
-                                                            const dex radiusSquared, const uint64_t maximumIterations) {
+                                                            const dex radiusSquared, const uint64_t maximumIterations,
+                                                            const std::stop_token &stopToken) {
             OrbitEvaluator evaluator(reference, dc);
             std::vector<OrbitPoint> misiurewiczStack;
             misiurewiczStack.reserve(static_cast<size_t>(std::min<uint64_t>(maximumIterations, 4096)));
@@ -95,7 +96,7 @@ namespace merutilm::rff2 {
                        separation > magnitudeSquared * dex(MIN_DISTINCT_MAGNITUDE_SCALE);
             };
 
-            while (evaluator.getIteration() < maximumIterations && evaluator.advance()) {
+            while (!stopToken.stop_requested() && evaluator.getIteration() < maximumIterations && evaluator.advance()) {
                 const complex<dex> z = evaluator.getZ();
                 const complex<dex> derivative = evaluator.getDerivative();
                 const dex magnitudeSquared = z.norm_sqr();
@@ -135,12 +136,15 @@ namespace merutilm::rff2 {
 
         template<Number Num>
         [[nodiscard]] FixedEvaluation evaluateFixed(const MB2Reference<Num> &reference, const complex<dex> dc,
-                                                    const uint64_t preperiod, const uint64_t endIteration) {
+                                                    const uint64_t preperiod, const uint64_t endIteration,
+                                                    const std::stop_token &stopToken) {
             OrbitEvaluator evaluator(reference, dc);
             complex<dex> preperiodZ = complex<dex>::ZERO;
             complex<dex> preperiodDerivative = complex<dex>::ZERO;
 
             while (evaluator.getIteration() < endIteration) {
+                if (stopToken.stop_requested())
+                    return {};
                 if (!evaluator.advance())
                     return {};
                 if (evaluator.getIteration() == preperiod) {
@@ -154,9 +158,10 @@ namespace merutilm::rff2 {
         template<Number Num>
         [[nodiscard]] std::optional<MandelbrotFeatureFinder::Result>
         findWithReference(const MB2RenderData<Num> &data, const complex<dex> cursorOffsetFromReference,
-                          const dex searchRadius) {
+                          const dex searchRadius, const std::stop_token &stopToken) {
             const MB2Reference<Num> *reference = data.reference.get();
-            if (!reference || reference->longestPeriod() == 0 || !(searchRadius > dex::ZERO))
+            if (stopToken.stop_requested() || !reference || reference->longestPeriod() == 0 ||
+                !(searchRadius > dex::ZERO))
                 return std::nullopt;
 
             const uint64_t maximumIterations = data.fractalSettings.perturb.maxIteration;
@@ -164,7 +169,7 @@ namespace merutilm::rff2 {
                 return std::nullopt;
             const dex radiusSquared = searchRadius * searchRadius;
             const std::optional<Detection> detection =
-                    detectPeriod(*reference, cursorOffsetFromReference, radiusSquared, maximumIterations);
+                    detectPeriod(*reference, cursorOffsetFromReference, radiusSquared, maximumIterations, stopToken);
             if (!detection || detection->endIteration <= detection->preperiod)
                 return std::nullopt;
 
@@ -172,8 +177,10 @@ namespace merutilm::rff2 {
             bool converged = false;
             std::vector<complex<dex>> refinementHistory;
             while (true) {
+                if (stopToken.stop_requested())
+                    return std::nullopt;
                 const FixedEvaluation evaluation =
-                        evaluateFixed(*reference, refined, detection->preperiod, detection->endIteration);
+                        evaluateFixed(*reference, refined, detection->preperiod, detection->endIteration, stopToken);
                 if (!evaluation.completed || evaluation.derivativeDifference.norm_sqr().is_zero())
                     return std::nullopt;
 
@@ -205,7 +212,7 @@ namespace merutilm::rff2 {
                 return std::nullopt;
 
             const FixedEvaluation validation =
-                    evaluateFixed(*reference, refined, detection->preperiod, detection->endIteration);
+                    evaluateFixed(*reference, refined, detection->preperiod, detection->endIteration, stopToken);
             const dex derivativeMagnitudeSquared = validation.derivativeDifference.norm_sqr();
             if (!validation.completed || derivativeMagnitudeSquared.is_zero())
                 return std::nullopt;
@@ -223,11 +230,11 @@ namespace merutilm::rff2 {
 
     std::optional<MandelbrotFeatureFinder::Result>
     MandelbrotFeatureFinder::find(const MB2RenderDataBase &data, const complex<dex> &cursorOffsetFromReference,
-                                  const dex searchRadius) {
+                                  const dex searchRadius, const std::stop_token stopToken) {
         if (const auto *light = dynamic_cast<const LightMB2RenderData *>(&data))
-            return findWithReference(*light, cursorOffsetFromReference, searchRadius);
+            return findWithReference(*light, cursorOffsetFromReference, searchRadius, stopToken);
         if (const auto *deep = dynamic_cast<const DeepMB2RenderData *>(&data))
-            return findWithReference(*deep, cursorOffsetFromReference, searchRadius);
+            return findWithReference(*deep, cursorOffsetFromReference, searchRadius, stopToken);
         return std::nullopt;
     }
 } // namespace merutilm::rff2

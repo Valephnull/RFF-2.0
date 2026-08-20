@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <stop_token>
 
 #include "../calc/complex.hpp"
 #include "MB2RenderData.hpp"
@@ -22,7 +23,8 @@ namespace merutilm::rff2 {
             dex estimatedSize = dex::ZERO;
         };
 
-        [[nodiscard]] static std::optional<Result>
-        find(const MB2RenderDataBase &data, const complex<dex> &cursorOffsetFromReference, dex searchRadius);
+        [[nodiscard]] static std::optional<Result> find(const MB2RenderDataBase &data,
+                                                        const complex<dex> &cursorOffsetFromReference, dex searchRadius,
+                                                        std::stop_token stopToken = {});
     };
 } // namespace merutilm::rff2

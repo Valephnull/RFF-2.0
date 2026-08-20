@@ -44,6 +44,7 @@ namespace merutilm::rff2 {
 
     void RFF2::onStart() {
         cursorManager = std::make_unique<CursorManager>(rootWindowContext->getWindow()->getWindow());
+        startGuidedZoomSearchWorker();
 
         applyShaderSettings(settings);
         refreshResizeParams(rootWindowContext->getSwapchain().getSwapchainExtent());
@@ -56,6 +57,7 @@ namespace merutilm::rff2 {
     void RFF2::onResize(const VkExtent2D newExtent) {
         Application::onResize(newExtent);
         if (newExtent.width > 0 || newExtent.height > 0) {
+            cancelGuidedZoomSearch();
             engine->getCore().getLogicalDevice().waitDeviceIdle();
             state.cancel();
             refreshResizeParams(newExtent);
@@ -65,7 +67,9 @@ namespace merutilm::rff2 {
     }
 
     void RFF2::onQuit() {
+        stopGuidedZoomSearchWorker();
         autoExplorer.stop();
+        renderPool.shutdown();
         state.cancel();
         crashRecovery.cleanShutdown();
         renderer = nullptr;
@@ -103,6 +107,7 @@ namespace merutilm::rff2 {
         }
 
         if (requests.recomputeRequested) {
+            cancelGuidedZoomSearch();
             canShowPreview = false;
             idleCompute = false;
             requests.recomputeRequested.exchange(false);
@@ -116,6 +121,7 @@ namespace merutilm::rff2 {
             backgroundThreads.notifyAll();
         }
 
+        renderPool.update(*this);
         autoExplorer.update(*this);
         crashRecovery.update(*this);
 
@@ -245,29 +251,28 @@ namespace merutilm::rff2 {
 
     uint16_t RFF2::getIterationBufferHeight() const { return renderer->rg0->iterationPalette->iterHeight; }
 
-    RFF2::GuidedZoomTarget RFF2::findGuidedZoomTarget(const int mouseX, const int mouseY) const {
+    RFF2::GuidedZoomTarget RFF2::findGuidedZoomTarget(const GuidedZoomSearchRequest &request) const {
+        std::shared_lock dataLock(renderDataMutex);
         const MB2RenderDataBase *data = renderData.get();
         const MB2PerturbatorBase *perturbator = data ? data->getPerturbator() : nullptr;
-        if (!settings.explore.autoMoveCursorToCenter || !idleCompute.load() || !data || !data->getReference() ||
-            !perturbator)
+        if (request.cancellation.stop_requested() || !data || !data->getReference() || !perturbator)
             return {};
 
-        const int width = getIterationBufferWidth();
-        const int height = getIterationBufferHeight();
-        const int cursorX = std::clamp(mouseX, 0, width - 1);
-        const int cursorY = std::clamp(mouseY, 0, height - 1);
-        const float clarity = std::max(settings.render.clarityMultiplier, 0.001f);
-        const dex divisor = getDivisor(settings);
+        const int width = request.width;
+        const int height = request.height;
+        const int cursorX = std::clamp(request.mouseX, 0, width - 1);
+        const int cursorY = std::clamp(request.mouseY, 0, height - 1);
+        const float clarity = request.clarity;
+        const dex divisor = request.divisor;
         const complex<dex> cursorOffsetFromCurrent = {
                 dex(static_cast<double>(cursorX) - static_cast<double>(width) / 2.0) / divisor / dex(clarity),
                 dex(static_cast<double>(cursorY) - static_cast<double>(height) / 2.0) / divisor / dex(clarity),
         };
         const complex<dex> cursorOffsetFromReference = cursorOffsetFromCurrent + perturbator->off;
 
-        const double requestedRadius =
-                static_cast<double>(std::max(1, settings.explore.autoAimRadiusPixels)) * clarity;
-        const int maximumRadius = std::max(
-                1, static_cast<int>(std::lround(std::min(requestedRadius, std::hypot(width, height)))));
+        const double requestedRadius = static_cast<double>(std::max(1, request.radiusPixels)) * clarity;
+        const int maximumRadius =
+                std::max(1, static_cast<int>(std::lround(std::min(requestedRadius, std::hypot(width, height)))));
         const int minimumRadius = std::max(1, maximumRadius / 2);
         const std::array radii = {minimumRadius, maximumRadius};
         GuidedZoomTarget selected = {};
@@ -276,8 +281,14 @@ namespace merutilm::rff2 {
         // Prefer Merutilm's auto-aim center when it is within the configured cursor
         // radius. The Imagina-inspired nearby-feature search remains as a fallback.
         if (const std::unique_ptr<fixed_point_complex_i1> centerOffset = MB2Locator::findCenterOffset(*data)) {
+            if (request.cancellation.stop_requested())
+                return {};
             complex<dex> offsetFromCurrent = static_cast<complex<dex>>(*centerOffset) - perturbator->off;
-            const std::array centerPixel = iterationBufferConversion(settings, offsetFromCurrent);
+            const auto [centerRe, centerIm] = static_cast<complex<double>>(offsetFromCurrent * dex(clarity) * divisor);
+            const std::array centerPixel = {
+                    static_cast<int>((centerRe < 0 ? std::round(centerRe) : std::ceil(centerRe)) + width / 2.0),
+                    static_cast<int>((centerIm < 0 ? std::round(centerIm) : std::ceil(centerIm)) + height / 2.0),
+            };
             const double centerDistance = std::hypot(static_cast<double>(centerPixel[0] - cursorX),
                                                      static_cast<double>(centerPixel[1] - cursorY));
             if (centerPixel[0] >= 0 && centerPixel[1] >= 0 && centerPixel[0] < width && centerPixel[1] < height &&
@@ -295,8 +306,11 @@ namespace merutilm::rff2 {
         }
 
         for (const int radiusPixels: radii) {
+            if (request.cancellation.stop_requested())
+                return {};
             const dex radius = dex(static_cast<double>(radiusPixels)) / divisor / dex(clarity);
-            const std::optional feature = MandelbrotFeatureFinder::find(*data, cursorOffsetFromReference, radius);
+            const std::optional feature =
+                    MandelbrotFeatureFinder::find(*data, cursorOffsetFromReference, radius, request.cancellation);
             if (!feature)
                 continue;
 
@@ -324,11 +338,118 @@ namespace merutilm::rff2 {
         return selected;
     }
 
-    void RFF2::refreshGuidedZoomTarget(const int mouseX, const int mouseY) {
-        if (!settings.explore.autoMoveCursorToCenter || !mouseInsideWindow || isNavigationLocked() ||
-            ImGui::GetIO().WantCaptureMouse) {
+    void RFF2::startGuidedZoomSearchWorker() {
+        if (guidedZoomSearchThread.joinable())
+            return;
+        guidedZoomSearchThread =
+                std::jthread([this](const std::stop_token stopToken) { guidedZoomSearchLoop(stopToken); });
+    }
+
+    void RFF2::stopGuidedZoomSearchWorker() {
+        if (!guidedZoomSearchThread.joinable())
+            return;
+        {
+            std::scoped_lock lock(guidedZoomSearchMutex);
+            guidedZoomActiveSearchStop.request_stop();
+            guidedZoomPendingSearch.reset();
+            guidedZoomCompletedSearch.reset();
+        }
+        guidedZoomSearchThread.request_stop();
+        guidedZoomSearchCondition.notify_all();
+        guidedZoomSearchThread.join();
+        guidedZoomSearchQueued = false;
+    }
+
+    void RFF2::guidedZoomSearchLoop(const std::stop_token stopToken) {
+        while (!stopToken.stop_requested()) {
+            GuidedZoomSearchRequest request;
+            {
+                std::unique_lock lock(guidedZoomSearchMutex);
+                guidedZoomSearchCondition.wait(lock, [this, &stopToken] {
+                    return stopToken.stop_requested() || guidedZoomPendingSearch.has_value();
+                });
+                if (stopToken.stop_requested())
+                    return;
+                request = std::move(*guidedZoomPendingSearch);
+                guidedZoomPendingSearch.reset();
+            }
+
+            GuidedZoomTarget target = findGuidedZoomTarget(request);
+            if (stopToken.stop_requested() || request.cancellation.stop_requested())
+                continue;
+            {
+                std::scoped_lock lock(guidedZoomSearchMutex);
+                if (!request.cancellation.stop_requested() && request.serial == guidedZoomSearchSerial) {
+                    guidedZoomCompletedSearch = GuidedZoomSearchResult{
+                            .target = std::move(target), .render = request.render, .serial = request.serial};
+                }
+            }
+        }
+    }
+
+    void RFF2::cancelGuidedZoomSearch(const bool clearTarget) {
+        {
+            std::scoped_lock lock(guidedZoomSearchMutex);
+            guidedZoomActiveSearchStop.request_stop();
+            guidedZoomPendingSearch.reset();
+            guidedZoomCompletedSearch.reset();
+            ++guidedZoomSearchSerial;
+        }
+        guidedZoomSearchQueued = false;
+        if (clearTarget) {
             guidedZoomTarget = {};
             guidedZoomTargetCached = false;
+        }
+    }
+
+    void RFF2::collectGuidedZoomSearchResult() {
+        std::optional<GuidedZoomSearchResult> result;
+        {
+            std::scoped_lock lock(guidedZoomSearchMutex);
+            if (guidedZoomCompletedSearch && guidedZoomCompletedSearch->serial == guidedZoomSearchSerial) {
+                result = std::move(guidedZoomCompletedSearch);
+                guidedZoomCompletedSearch.reset();
+            }
+        }
+        if (!result)
+            return;
+        guidedZoomTarget = std::move(result->target);
+        guidedZoomTargetCached = true;
+        guidedZoomSearchQueued = false;
+    }
+
+    void RFF2::queueGuidedZoomSearch(const int mouseX, const int mouseY, const int radiusPixels,
+                                     const uint64_t render) {
+        GuidedZoomSearchRequest request{
+                .mouseX = mouseX,
+                .mouseY = mouseY,
+                .width = getIterationBufferWidth(),
+                .height = getIterationBufferHeight(),
+                .radiusPixels = radiusPixels,
+                .clarity = std::max(settings.render.clarityMultiplier, 0.001f),
+                .divisor = getDivisor(settings),
+                .render = render,
+        };
+        {
+            std::scoped_lock lock(guidedZoomSearchMutex);
+            guidedZoomActiveSearchStop.request_stop();
+            guidedZoomActiveSearchStop = std::stop_source{};
+            request.cancellation = guidedZoomActiveSearchStop.get_token();
+            request.serial = ++guidedZoomSearchSerial;
+            guidedZoomPendingSearch = std::move(request);
+            guidedZoomCompletedSearch.reset();
+        }
+        guidedZoomTarget = {};
+        guidedZoomTargetCached = false;
+        guidedZoomSearchQueued = true;
+        guidedZoomSearchCondition.notify_one();
+    }
+
+    void RFF2::refreshGuidedZoomTarget(const int mouseX, const int mouseY) {
+        collectGuidedZoomSearchResult();
+        if (!settings.explore.autoMoveCursorToCenter || !mouseInsideWindow || isNavigationLocked() ||
+            ImGui::GetIO().WantCaptureMouse) {
+            cancelGuidedZoomSearch();
             return;
         }
         if (!idleCompute.load())
@@ -340,15 +461,15 @@ namespace merutilm::rff2 {
         const int quantizedY = mouseY / CURSOR_QUANTIZATION * CURSOR_QUANTIZATION;
         const int radiusPixels = settings.explore.autoAimRadiusPixels;
         const uint64_t render = completedRenderCount.load();
-        if (guidedZoomTargetCached && guidedZoomMouseX == quantizedX && guidedZoomMouseY == quantizedY &&
-            guidedZoomTargetRender == render && guidedZoomTargetRadiusPixels == radiusPixels) {
+        if ((guidedZoomTargetCached || guidedZoomSearchQueued) && guidedZoomMouseX == quantizedX &&
+            guidedZoomMouseY == quantizedY && guidedZoomTargetRender == render &&
+            guidedZoomTargetRadiusPixels == radiusPixels) {
             return;
         }
 
         const double now = rootWindowContext->getWindow()->getTime();
-        if (guidedZoomTargetCached && guidedZoomTargetRender == render &&
-            guidedZoomTargetRadiusPixels == radiusPixels &&
-            now - guidedZoomLastSearchTime < MINIMUM_SEARCH_INTERVAL) {
+        if ((guidedZoomTargetCached || guidedZoomSearchQueued) && guidedZoomTargetRender == render &&
+            guidedZoomTargetRadiusPixels == radiusPixels && now - guidedZoomLastSearchTime < MINIMUM_SEARCH_INTERVAL) {
             return;
         }
 
@@ -357,15 +478,13 @@ namespace merutilm::rff2 {
         guidedZoomTargetRadiusPixels = radiusPixels;
         guidedZoomTargetRender = render;
         guidedZoomLastSearchTime = now;
-        guidedZoomTarget = findGuidedZoomTarget(quantizedX, quantizedY);
-        guidedZoomTargetCached = true;
+        queueGuidedZoomSearch(quantizedX, quantizedY, radiusPixels, render);
     }
 
     void RFF2::renderGuidedZoomOverlay() {
         if (!settings.explore.autoMoveCursorToCenter || !mouseInsideWindow || isNavigationLocked() ||
             ImGui::GetIO().WantCaptureMouse) {
-            guidedZoomTarget = {};
-            guidedZoomTargetCached = false;
+            cancelGuidedZoomSearch();
             return;
         }
 
@@ -403,8 +522,7 @@ namespace merutilm::rff2 {
         });
         eventSystem.mouse.onMouseExit.add([this] {
             mouseInsideWindow = false;
-            guidedZoomTarget = {};
-            guidedZoomTargetCached = false;
+            cancelGuidedZoomSearch();
             glfwSetCursor(cursorManager->window, nullptr);
         });
 
@@ -490,6 +608,13 @@ namespace merutilm::rff2 {
             }
 
             zoom(anchorX, anchorY, increment, false);
+
+            // A queued search describes the pre-zoom view. Do not let a slow
+            // result arrive later and redirect a subsequent wheel step using
+            // stale coordinates. Cached targets are updated below and remain
+            // usable throughout a rapid wheel burst.
+            if (guidedZoomSearchQueued)
+                cancelGuidedZoomSearch();
 
             if (featureRedirected) {
                 const float scale = std::pow(10.0f, increment);
@@ -686,6 +811,7 @@ namespace merutilm::rff2 {
         renderStatusImGui();
         renderGuidedZoomOverlay();
         crashRecovery.renderImGui(*this);
+        FnVideo::renderingProcessWindow(*this);
     }
 
     void RFF2::renderControlImGui() {
@@ -750,7 +876,7 @@ namespace merutilm::rff2 {
                 FnVideo::dataSettings(*this);
                 FnVideo::animationSettings(*this);
                 FnVideo::exportSettings(*this);
-                FnVideo::generateVidKeyframes(*this);
+                FnVideo::renderingProcessMenu(*this);
                 FnVideo::exportZoomVideo(*this);
                 ImGui::EndDisabled();
                 ImGui::EndTabItem();
@@ -973,7 +1099,7 @@ namespace merutilm::rff2 {
     }
 
     bool RFF2::prepareRenderData(const float startTime, const Settings &s) {
-
+        std::unique_lock renderDataLock(renderDataMutex);
 
         canShowPreview = false;
 
@@ -1136,6 +1262,7 @@ namespace merutilm::rff2 {
         if (!success) {
             // vkh::logger::log("Recompute cancelled.");
         }
+        lastRenderSucceeded = success;
         idleCompute = true;
         ++completedRenderCount;
         if (unlockNavigationAfterRender.exchange(false))

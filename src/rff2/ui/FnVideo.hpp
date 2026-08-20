@@ -10,7 +10,9 @@ namespace merutilm::rff2 {
         static void dataSettings(RFF2 &app);
         static void animationSettings(RFF2 &app);
         static void exportSettings(RFF2 &app);
+        static void renderingProcessMenu(RFF2 &app);
+        static void renderingProcessWindow(RFF2 &app);
         static void generateVidKeyframes(RFF2 &app);
         static void exportZoomVideo(RFF2 &app);
     };
-}
+} // namespace merutilm::rff2

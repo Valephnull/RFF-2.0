@@ -69,6 +69,10 @@ namespace merutilm::rff2 {
         exportFile(IOUtilities::generateFilename(dir, Constants::File::EXT_LOCATION, nullptr));
     }
 
+    void RFFLocationBinary::exportAsKeyframe(const std::filesystem::path &dir, const uint32_t id) const {
+        exportFile(dir / IOUtilities::fileNameFormat(id, Constants::File::EXT_LOCATION));
+    }
+
 
     void RFFLocationBinary::exportFile(const std::filesystem::path &path) const {
         if (std::ofstream out(path, std::ios::out | std::ios::binary | std::ios::trunc); out.is_open()) {

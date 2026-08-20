@@ -17,6 +17,12 @@
 
 
 namespace merutilm::rff2 {
+    namespace {
+        enum class RenderingProcessMode : uint8_t { THIS_COMPUTER, RENDER_POOL };
+
+        bool showRenderingProcess = false;
+        RenderingProcessMode renderingProcessMode = RenderingProcessMode::THIS_COMPUTER;
+    } // namespace
 
     void FnVideo::dataSettings(RFF2 &app) {
         static bool enabled = false;
@@ -32,7 +38,7 @@ namespace merutilm::rff2 {
 
             ImGui::Checkbox("Static data", &isStatic);
             Utilities::imguiHelpMarker("Generates using .png image instead of data file. all shaders will be disabled "
-                    "when trying to generate video data.");
+                                       "when trying to generate video data.");
             ImGui::End();
         }
     }
@@ -67,8 +73,43 @@ namespace merutilm::rff2 {
 
             ImGui::End();
         }
-
     }
+
+    void FnVideo::renderingProcessMenu(RFF2 &) { ImGui::Checkbox("Rendering Process", &showRenderingProcess); }
+
+    void FnVideo::renderingProcessWindow(RFF2 &app) {
+        if (app.getRenderPool().isActive())
+            showRenderingProcess = true;
+        if (!showRenderingProcess)
+            return;
+        bool *open = app.getRenderPool().isActive() ? nullptr : &showRenderingProcess;
+        if (!ImGui::Begin("Rendering Process", open)) {
+            ImGui::End();
+            return;
+        }
+
+        const bool processLocked = app.isNavigationLocked() && !app.getRenderPool().isActive();
+        int mode = static_cast<int>(renderingProcessMode);
+        const char *modes[] = {"This Computer", "Render Pool"};
+        ImGui::BeginDisabled(app.getRenderPool().isActive() || processLocked);
+        if (ImGui::Combo("Mode", &mode, modes, static_cast<int>(std::size(modes))))
+            renderingProcessMode = static_cast<RenderingProcessMode>(mode);
+        ImGui::EndDisabled();
+
+        if (app.getRenderPool().isActive())
+            renderingProcessMode = RenderingProcessMode::RENDER_POOL;
+
+        ImGui::BeginDisabled(processLocked);
+        if (renderingProcessMode == RenderingProcessMode::THIS_COMPUTER) {
+            ImGui::TextWrapped("Generate all keyframes on this computer.");
+            generateVidKeyframes(app);
+        } else {
+            app.getRenderPool().renderPanel(app);
+        }
+        ImGui::EndDisabled();
+        ImGui::End();
+    }
+
     void FnVideo::generateVidKeyframes(RFF2 &app) {
         if (ImGui::Button("Generate Video Keyframes", ImVec2(-FLT_MIN, 0))) {
             app.getBackgroundThreads().createThread([&app](BackgroundThread &thread) {
@@ -115,10 +156,10 @@ namespace merutilm::rff2 {
 
 
                     if (videoSettings.data.isStatic) {
-                        app.getRequests().requestCreateImage(IOUtilities::generateFilename(dir, Constants::File::EXT_IMAGE, nullptr).string());
+                        app.getRequests().requestCreateImage(
+                                IOUtilities::generateFilename(dir, Constants::File::EXT_IMAGE, nullptr).string());
                         thread.waitUntil([&app] { return !app.getRequests().createImageRequested; });
-                        RFFStaticMapBinary(logZoom, app.getIterationBufferWidth(),
-                                           app.getIterationBufferHeight())
+                        RFFStaticMapBinary(logZoom, app.getIterationBufferWidth(), app.getIterationBufferHeight())
                                 .exportAsKeyframe(dir);
                     } else {
                         app.generateMap().exportAsKeyframe(dir);
@@ -127,7 +168,8 @@ namespace merutilm::rff2 {
                     auto &center = settings.fractal.reference.center;
                     RFFLocationBinary(settings.fractal.general.logZoom, center.real.to_string(),
                                       center.imag.to_string(), settings.fractal.perturb.maxIteration)
-                            .exportFile(IOUtilities::generateFilename(dir, Constants::File::EXT_LOCATION, nullptr).string());
+                            .exportFile(IOUtilities::generateFilename(dir, Constants::File::EXT_LOCATION, nullptr)
+                                                .string());
                     logZoom -= increment;
                     nextFrame = true;
                 }
@@ -154,11 +196,10 @@ namespace merutilm::rff2 {
         }
 
         auto &[mutex, ratio, remainedTimeStr] = app.getVideoProgressInfo();
-        if (ratio > 0)
-        {
+        if (ratio > 0) {
             std::scoped_lock lock(mutex);
             ImGui::ProgressBar(ratio);
-            ImGui::Text("%s",  remainedTimeStr.data());
+            ImGui::Text("%s", remainedTimeStr.data());
         }
     }
 

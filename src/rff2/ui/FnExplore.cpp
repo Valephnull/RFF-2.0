@@ -22,7 +22,7 @@ namespace merutilm::rff2 {
         std::atomic<bool> newtonRunning = false;
         std::atomic<uint64_t> newtonPeriod = 0;
         std::mutex newtonStatusMutex;
-        std::string newtonStatus = "Ready. The search starts from the current view.";
+        std::string newtonStatus;
 
         void setNewtonStatus(std::string message) {
             std::scoped_lock lock(newtonStatusMutex);
@@ -140,7 +140,6 @@ namespace merutilm::rff2 {
                 ImGui::InputFloat("Custom Size Factor", &customSizeFactor, 0.1f, 1.0f, "%.6f");
         }
 
-        ImGui::TextDisabled("Period method: RFF Fast-period-guessing (Power 2)");
         const uint64_t detectedPeriod = newtonPeriod.load();
         if (detectedPeriod > 0)
             ImGui::Text("Detected period: %llu", static_cast<unsigned long long>(detectedPeriod));
@@ -262,7 +261,9 @@ namespace merutilm::rff2 {
                 app.getState().interrupt();
             }
         }
-        ImGui::TextWrapped("%s", getNewtonStatus().c_str());
+        const std::string displayedStatus = getNewtonStatus();
+        if (!newtonRunning.load() && !displayedStatus.empty())
+            ImGui::TextWrapped("%s", displayedStatus.c_str());
         if (ImGui::Button("Close", ImVec2(-FLT_MIN, 0))) {
             if (newtonRunning.load()) {
                 setNewtonStatus("Cancellation requested...");
