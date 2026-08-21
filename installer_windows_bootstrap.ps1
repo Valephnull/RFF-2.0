@@ -36,10 +36,35 @@ function Remove-DirectoryIfPresent([string]$Path)
     }
 }
 
-function Get-RemoteHeadSha([string]$Url)
+function ConvertTo-MsysPath([string]$Bash, [string]$Path)
 {
-    $Line = git ls-remote $Url HEAD | Select-Object -First 1
-    Assert-NativeSuccess "Reading the repository version"
+    $Lines = @(& $Bash -lc 'cygpath -u "$1"' -- $Path)
+    $ExitCode = $LASTEXITCODE
+    if ($ExitCode -ne 0)
+    {
+        throw "Converting '$Path' to an MSYS2 path failed with exit code $ExitCode."
+    }
+
+    $Converted = $Lines | Select-Object -Last 1
+    if ([string]::IsNullOrWhiteSpace($Converted))
+    {
+        throw "MSYS2 did not return a path for '$Path'."
+    }
+    return $Converted.Trim()
+}
+
+function Get-RemoteHeadSha([string]$Bash, [string]$Url)
+{
+    # MSYS2 Git must run inside its Bash environment. Launching usr\bin\git.exe
+    # directly from PowerShell can abort its HTTPS helper and report exit code -1.
+    $Lines = @(& $Bash -lc 'git ls-remote --exit-code "$1" HEAD' -- $Url)
+    $ExitCode = $LASTEXITCODE
+    if ($ExitCode -ne 0)
+    {
+        throw "Reading the repository version failed with exit code $ExitCode. Check the GitHub connection and try again."
+    }
+
+    $Line = $Lines | Where-Object { $_ -match '^[0-9a-fA-F]{40}\s+HEAD$' } | Select-Object -First 1
     if (-not $Line)
     {
         throw "The repository did not return a HEAD revision: $Url"
@@ -123,7 +148,8 @@ if ($UserPathParts -notcontains $Clang64Bin)
 
 Write-Step "Checking the installed version"
 
-$NewestSha = Get-RemoteHeadSha $RepoUrl
+$SourceDirUnix = ConvertTo-MsysPath $Msys2Bash $SourceDir
+$NewestSha = Get-RemoteHeadSha $Msys2Bash $RepoUrl
 $InstalledSha = if (Test-Path -LiteralPath $VersionFile)
 {
     (Get-Content -LiteralPath $VersionFile -Raw).Trim()
@@ -149,7 +175,7 @@ if ($InstalledSha -eq $NewestSha -and $InstallComplete)
 Write-Step "Downloading RFF-EXP"
 
 Remove-DirectoryIfPresent $SourceDir
-git clone --depth 1 $RepoUrl $SourceDir
+& $Msys2Bash -lc 'git clone --depth 1 "$1" "$2"' -- $RepoUrl $SourceDirUnix
 Assert-NativeSuccess "Cloning RFF-EXP"
 
 Write-Step "Downloading external source dependencies"
@@ -165,7 +191,8 @@ foreach ($Url in $ExternRepos)
 {
     $DirectoryName = [System.IO.Path]::GetFileNameWithoutExtension($Url.TrimEnd('/'))
     $Destination = Join-Path $ExternDir $DirectoryName
-    git clone --depth 1 $Url $Destination
+    $DestinationUnix = ConvertTo-MsysPath $Msys2Bash $Destination
+    & $Msys2Bash -lc 'git clone --depth 1 "$1" "$2"' -- $Url $DestinationUnix
     Assert-NativeSuccess "Cloning external dependency $Url"
 }
 
@@ -182,8 +209,6 @@ $ParallelJobs = if ($env:NUMBER_OF_PROCESSORS) { [int]$env:NUMBER_OF_PROCESSORS 
 cmake --build $BuildDir --parallel $ParallelJobs
 Assert-NativeSuccess "Building RFF-EXP"
 
-$SourceDirUnix = (& $Msys2Bash -lc 'cygpath -u "$1"' -- $SourceDir | Select-Object -Last 1).Trim()
-Assert-NativeSuccess "Converting the source path for shader compilation"
 & $Msys2Bash -lc 'export PATH="/clang64/bin:$PATH"; cd "$1" && ./compile.sh' -- $SourceDirUnix
 Assert-NativeSuccess "Compiling RFF-EXP shaders"
 
