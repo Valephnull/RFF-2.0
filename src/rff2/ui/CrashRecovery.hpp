@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -10,9 +11,12 @@ namespace merutilm::rff2 {
     class RFF2;
 
     class CrashRecovery final {
+        enum class RecoveryKind : uint8_t { NONE, CRASH_AUTOSAVE, LAST_RENDERED };
+
         std::filesystem::path recoveryPath;
         std::filesystem::path temporaryPath;
         std::optional<RFFLocationBinary> pendingRecovery;
+        RecoveryKind recoveryKind = RecoveryKind::NONE;
         bool initialized = false;
         bool awaitingDecision = false;
         bool popupRequested = false;

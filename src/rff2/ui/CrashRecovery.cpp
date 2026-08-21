@@ -39,9 +39,19 @@ namespace merutilm::rff2 {
             pendingRecovery = temporary;
         }
 
+        if (pendingRecovery) {
+            recoveryKind = RecoveryKind::CRASH_AUTOSAVE;
+        } else if (const std::optional<RFFLocationBinary> lastRendered =
+                           readValid(RFF2::getBackupLocationPath())) {
+            pendingRecovery = lastRendered;
+            recoveryKind = RecoveryKind::LAST_RENDERED;
+        }
+
         awaitingDecision = pendingRecovery.has_value();
-        if (!awaitingDecision)
+        if (!awaitingDecision) {
+            recoveryKind = RecoveryKind::NONE;
             discardRecovery();
+        }
     }
 
     void CrashRecovery::update(RFF2 &app) {
@@ -60,15 +70,23 @@ namespace merutilm::rff2 {
         if (!awaitingDecision)
             return;
 
+        const bool crashAutosave = recoveryKind == RecoveryKind::CRASH_AUTOSAVE;
+        const char *title = crashAutosave ? "Recover Previous Session" : "Reload Last Rendered Location";
+
         if (!popupRequested) {
-            ImGui::OpenPopup("Recover Previous Session");
+            ImGui::OpenPopup(title);
             popupRequested = true;
         }
 
-        if (!ImGui::BeginPopupModal("Recover Previous Session", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
             return;
 
-        ImGui::TextWrapped("RFF-EXP did not finish its previous session cleanly. Recover the last autosaved location?");
+        if (crashAutosave) {
+            ImGui::TextWrapped(
+                    "RFF-EXP did not finish its previous session cleanly. Recover the last autosaved location?");
+        } else {
+            ImGui::TextWrapped("RFF-EXP found the location from the last completed render. Reload it?");
+        }
         if (pendingRecovery) {
             ImGui::Separator();
             ImGui::Text("Log zoom: %.6f", pendingRecovery->getLogZoom());
@@ -76,7 +94,8 @@ namespace merutilm::rff2 {
                         static_cast<unsigned long long>(pendingRecovery->getMaxIteration()));
         }
 
-        if (ImGui::Button("Recover", ImVec2(180, 0))) {
+        const char *acceptLabel = crashAutosave ? "Recover" : "Reload";
+        if (ImGui::Button(acceptLabel, ImVec2(180, 0))) {
             if (pendingRecovery) {
                 Settings &settings = app.getSettings();
                 settings.fractal.reference.center = fixed_point_complex_i1(
@@ -89,16 +108,20 @@ namespace merutilm::rff2 {
             }
             awaitingDecision = false;
             pendingRecovery.reset();
+            recoveryKind = RecoveryKind::NONE;
             lastSaveTime = -1;
             lastReal.clear();
             lastImag.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Start Fresh", ImVec2(180, 0))) {
-            discardRecovery();
+        const char *declineLabel = crashAutosave ? "Start Fresh" : "Keep Current";
+        if (ImGui::Button(declineLabel, ImVec2(180, 0))) {
+            if (crashAutosave)
+                discardRecovery();
             awaitingDecision = false;
             pendingRecovery.reset();
+            recoveryKind = RecoveryKind::NONE;
             lastSaveTime = -1;
             lastReal.clear();
             lastImag.clear();

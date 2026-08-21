@@ -1029,19 +1029,6 @@ namespace merutilm::rff2 {
 
 
         state.createThread([this] {
-            static bool backUpLoadConfirmed = false;
-            if (!backUpLoadConfirmed) {
-                backUpLoadConfirmed = true;
-                const auto path = getBackupLocationPath();
-                if (std::filesystem::exists(path) &&
-                    vkh::logger::log_warn("Do you want to load the last rendered location?")) {
-                    if (!std::filesystem::exists(path))
-                        return; // user deleted file manually
-                    loadLocation(path);
-                    return;
-                }
-            }
-
             const Settings s = this->settings; // clone the settings
             const auto start = rootWindowContext->getWindow()->getTime();
             bool success = false;
